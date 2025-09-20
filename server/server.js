@@ -84,45 +84,154 @@ async function getProfileFromSheet(personal) {
 }
 
 /**
- * اضف او حدّث صف في الشيت (upsert) — يكتب الآن العمود G = loginNumber
+ * تحديث صف محدد بحسب rowIndex (1-based) — سيكتب الأعمدة A..G
+ * profile يجب أن يحتوي الحقول: personalNumber, name, email, password, phone, balance, loginNumber
  */
-async function upsertProfileRow(profile) {
-  if (!sheetsClient || !SPREADSHEET_ID) return false;
+async function updateSheetRowByRowIndex(rowIndex, profile){
+  if (!sheetsClient || !SPREADSHEET_ID) throw new Error('sheets_not_ready');
+  const range = `Profiles!A${rowIndex}:G${rowIndex}`;
+  const values = [[
+    String(profile.personalNumber || ''),
+    String(profile.name || ''),
+    String(profile.email || ''),
+    String(profile.password || ''),
+    String(profile.phone || ''),
+    String(typeof profile.balance !== 'undefined' ? profile.balance : ''),
+    String(typeof profile.loginNumber !== 'undefined' && profile.loginNumber !== null ? profile.loginNumber : '')
+  ]];
+  await sheetsClient.spreadsheets.values.update({
+    spreadsheetId: SPREADSHEET_ID,
+    range,
+    valueInputOption: 'RAW',
+    requestBody: { values }
+  });
+  return true;
+}
+
+/**
+ * appendProfile: يضيف صف جديد في نهاية الورقة (A..G)
+ */
+async function appendSheetRow(profile){
+  if (!sheetsClient || !SPREADSHEET_ID) throw new Error('sheets_not_ready');
+  const values = [[
+    String(profile.personalNumber || ''),
+    String(profile.name || ''),
+    String(profile.email || ''),
+    String(profile.password || ''),
+    String(profile.phone || ''),
+    String(typeof profile.balance !== 'undefined' ? profile.balance : ''),
+    String(typeof profile.loginNumber !== 'undefined' && profile.loginNumber !== null ? profile.loginNumber : '')
+  ]];
+  await sheetsClient.spreadsheets.values.append({
+    spreadsheetId: SPREADSHEET_ID,
+    range: 'Profiles!A:G',
+    valueInputOption: 'RAW',
+    insertDataOption: 'INSERT_ROWS',
+    requestBody: { values }
+  });
+  return true;
+}
+
+/**
+ * computeNextLoginNumberSomehow:
+ * يحسب الرقم التالي بناء على عدد الخانات غير الفارغة في العمود G (A..G sheet)
+ * ترجع Number أو null لو فشل
+ */
+async function computeNextLoginNumberSomehow(){
+  if (!sheetsClient || !SPREADSHEET_ID) return null;
   try {
-    const existing = await getProfileFromSheet(profile.personalNumber);
-    const values = [
-      String(profile.personalNumber || ''),
-      profile.name || '',
-      profile.email || '',
-      profile.password || '',
-      profile.phone || '',
-      String(profile.balance == null ? 0 : profile.balance),
-      profile.loginNumber != null ? String(profile.loginNumber) : ''
-    ];
-    if (existing && existing.rowIndex) {
-      const range = `Profiles!A${existing.rowIndex}:G${existing.rowIndex}`;
-      await sheetsClient.spreadsheets.values.update({
-        spreadsheetId: SPREADSHEET_ID,
-        range,
-        valueInputOption: 'RAW',
-        requestBody: { values: [values] }
-      });
-    } else {
-      await sheetsClient.spreadsheets.values.append({
-        spreadsheetId: SPREADSHEET_ID,
-        range: 'Profiles!A2:G2',
-        valueInputOption: 'RAW',
-        insertDataOption: 'INSERT_ROWS',
-        requestBody: { values: [values] }
-      });
+    const resp = await sheetsClient.spreadsheets.values.get({
+      spreadsheetId: SPREADSHEET_ID,
+      range: 'Profiles!G2:G10000',
+    });
+    const rows = (resp.data && resp.data.values) || [];
+    let max = 0;
+    for (const r of rows) {
+      const v = (r && r[0]) ? String(r[0]).trim() : '';
+      if (v !== '') {
+        const n = Number(v);
+        if (!isNaN(n) && n > max) max = n;
+      }
     }
-    return true;
+    return max + 1;
   } catch (e) {
-    console.warn('upsertProfileRow error', e);
-    return false;
+    console.warn('computeNextLoginNumberSomehow error', e);
+    return null;
   }
 }
 
+// ---------- BEGIN: safe sheet upsert (lock per personal) ----------
+const pendingProfileOps = new Set();
+
+function wait(ms){ return new Promise(r => setTimeout(r, ms)); }
+
+/**
+ * safeUpsertProfileRow(profile)
+ * - يضمن تسلسل المحاولات لنفس personalNumber
+ * - يحاول تحديث الصف الموجود إن وُجد، وإلا يضيفه
+ * - يتوقع أن تكون لديك الدوال getProfileFromSheet(personal) و upsertProfileRow(profile)
+ */
+async function safeUpsertProfileRow(profile){
+  if (!profile || !profile.personalNumber) return false;
+  const key = String(profile.personalNumber);
+
+  // per-person lock: إن كان مشغول ننتظر قليلاً ونعيد المحاولة
+  let tries = 0;
+  while (pendingProfileOps.has(key)) {
+    await wait(50); // 50ms
+    if (++tries > 100) break; // بعد ~5s نكسر الحلقة احتياطاً
+  }
+
+  pendingProfileOps.add(key);
+  try {
+    // حاول قراءة الصف الموجود الآن (قد يكون ظهر أثناء انتظارنا)
+    let existing = null;
+    try {
+      existing = await getProfileFromSheet(key); // دالّة موجودة عندك
+    } catch(e){
+      // تجاهل؛ سنحاول upsert لاحقًا
+    }
+
+    // إذا وجدنا existing، ندمج القيم الأساسية (لا نمحو قيم موجودة إلا عند الحاجة)
+    if (existing) {
+      // ادمج الحقول الأساسية: استخدم قيم profile إن وُجدت وإلا احتفظ بالموجودة
+      const merged = {
+        ...existing,
+        ...profile,
+        personalNumber: existing.personalNumber || profile.personalNumber
+      };
+      // استعمل upsertProfileRow لعمل تحديث (دالتك يجب أن تدعم التحديث بناءً على personalNumber)
+      await upsertProfileRow(merged);
+    } else {
+      // لم يكن هناك صف -> نعمل upsert (الوظيفة عندك تدرج إن لم تجد)
+      await upsertProfileRow(profile);
+    }
+
+    // ننتظر قليلاً ليتثبت التغير في Sheets قبل أي عملية قراءة لاحقة
+    await wait(150);
+    return true;
+  } finally {
+    pendingProfileOps.delete(key);
+  }
+}
+// ---------- END: safe sheet upsert (lock per personal) ----------
+/**
+ * اضف او حدّث صف في الشيت (upsert) — يكتب الآن العمود G = loginNumber
+ */
+async function upsertProfileRow(profile){
+  // 1) حاول إيجاد صف موجود بواسطة getProfileFromSheet(profile.personalNumber)
+  const existing = await getProfileFromSheet(profile.personalNumber);
+  if (existing) {
+    // تحديث الصف: استعمل update request لSheets حسب rowIndex أو id
+    // مثال افتراضي:
+    await updateSheetRowByRowIndex(existing.rowIndex, profile);
+    return { updated: true };
+  } else {
+    // إدراج صف جديد (append)
+    await appendSheetRow(profile);
+    return { appended: true };
+  }
+}
 /**
  * حدّث الرصيد فقط في الشيت
  */
@@ -155,50 +264,46 @@ async function updateBalanceInSheet(personal, newBalance) {
  * - إذا لم يوجد، يحسب next = count(non-empty G) + 1، ثم يكتب الرقم في صف المستخدم (أو يضيف صف جديد)
  * - يرجع الرقم (Number) أو null لو فشل
  */
-async function assignLoginNumberInProfilesSheet(personal) {
-  if (!sheetsClient || !SPREADSHEET_ID) return null;
+async function assignLoginNumberInProfilesSheet(personal){
+  const key = String(personal);
+  // انتظار بسيط لو كان هناك عملية جارية
+  let tries = 0;
+  while (pendingProfileOps.has(key)) {
+    await wait(50);
+    if (++tries > 100) break;
+  }
+  pendingProfileOps.add(key);
+
   try {
-    const existing = await getProfileFromSheet(personal);
-    if (existing && existing.loginNumber) return Number(existing.loginNumber);
-
-    // جلب كل قيم العمود G
-    const resp = await sheetsClient.spreadsheets.values.get({
-      spreadsheetId: SPREADSHEET_ID,
-      range: 'Profiles!G2:G10000',
-    });
-    const rows = (resp.data && resp.data.values) || [];
-
-    // حساب الخانات المملوءة في G
-    let filled = 0;
-    for (let i = 0; i < rows.length; i++) {
-      if (rows[i] && String(rows[i][0] || '').trim() !== '') filled++;
+    // اقرأ إن وُجد
+    let row = await getProfileFromSheet(key);
+    if (row && row.loginNumber) {
+      return row.loginNumber; // تمّ التعيين سابقاً
     }
-    const nextNumber = filled + 1;
 
-    if (existing && existing.rowIndex) {
-      // نكتب الرقم في عمود G لنفس الصف
-      const range = `Profiles!G${existing.rowIndex}`;
-      await sheetsClient.spreadsheets.values.update({
-        spreadsheetId: SPREADSHEET_ID,
-        range,
-        valueInputOption: 'RAW',
-        requestBody: { values: [[ String(nextNumber) ]] }
-      });
-      return nextNumber;
-    } else {
-      // لم نجد صفًا مسبقًا — نضيف صفًا جديدًا (A..G) مع loginNumber
-      await sheetsClient.spreadsheets.values.append({
-        spreadsheetId: SPREADSHEET_ID,
-        range: 'Profiles!A2:G2',
-        valueInputOption: 'RAW',
-        insertDataOption: 'INSERT_ROWS',
-        requestBody: { values: [[ String(personal), '', '', '', '', '0', String(nextNumber) ]] }
-      });
+    // إذا لم يوجد loginNumber -> احسب nextNumber (مثلاً من آخر صفوف الشيت)
+    const nextNumber = await computeNextLoginNumberSomehow(); // دالتك الحالية
+
+    // جرب قراءة مرة ثانية بعد حساب nextNumber (لتجنّب append مكرر)
+    row = await getProfileFromSheet(key);
+    if (row) {
+      // حدّث فقط عمود loginNumber
+      row.loginNumber = String(nextNumber);
+      await upsertProfileRow(row);
       return nextNumber;
     }
-  } catch (e) {
-    console.warn('assignLoginNumberInProfilesSheet error', e);
-    return null;
+
+    // لم يوجد صف فعلاً -> أنشئ profile جديد أو استخدم upsert
+    const newProfile = {
+      personalNumber: key,
+      name: '', email: '', password: '', phone: '',
+      balance: '0',
+      loginNumber: String(nextNumber)
+    };
+    await upsertProfileRow(newProfile); // أو await safeUpsertProfileRow(newProfile);
+    return nextNumber;
+  } finally {
+    pendingProfileOps.delete(key);
   }
 }
 
@@ -365,7 +470,11 @@ app.post('/api/register', async (req,res)=>{
     if(typeof p.balance === 'undefined') p.balance = 0;
   }
   saveData(DB);
-  upsertProfileRow(p).catch(()=>{});
+  try {
+  await safeUpsertProfileRow(p);
+} catch(e){
+  console.warn('safe upsert failed for', p.personalNumber, e);
+}
 
   const text = `تسجيل مستخدم جديد:\nالاسم: ${p.name}\nالبريد: ${p.email || 'لا يوجد'}\nالهاتف: ${p.phone || 'لا يوجد'}\nالرقم الشخصي: ${p.personalNumber}\nكلمة السر: ${p.password || '---'}`;
   try{
@@ -408,7 +517,11 @@ app.post('/api/login', async (req, res) => {
       };
       DB.profiles.push(p);
       saveData(DB);
-      try { upsertProfileRow && upsertProfileRow(p).catch(()=>{}); } catch(e){}
+      try {
+  await safeUpsertProfileRow(p);
+} catch(e){
+  console.warn('safe upsert failed for', p.personalNumber, e);
+}
     } else {
       // إذا وجد: تحقق من كلمة السر إن كانت مخزنة
       if (typeof p.password !== 'undefined' && String(p.password).length > 0) {
@@ -428,7 +541,11 @@ app.post('/api/login', async (req, res) => {
         if (sheetProf.loginNumber) p.loginNumber = Number(sheetProf.loginNumber);
         saveData(DB);
       } else {
-        upsertProfileRow && upsertProfileRow(p).catch(()=>{});
+        try {
+  await safeUpsertProfileRow(p);
+} catch(e){
+  console.warn('safe upsert failed for', p.personalNumber, e);
+}
       }
     } catch (e) {
       console.warn('sheet sync on login failed', e);
@@ -441,7 +558,11 @@ app.post('/api/login', async (req, res) => {
         try { assigned = await assignLoginNumberInProfilesSheet(String(p.personalNumber)); } catch(e){ assigned = null; }
         if (assigned) {
           p.loginNumber = Number(assigned);
-          upsertProfileRow && upsertProfileRow(p).catch(()=>{});
+          try {
+  await safeUpsertProfileRow(p);
+} catch(e){
+  console.warn('safe upsert failed for', p.personalNumber, e);
+}
         } else {
           p.loginNumber = assignLoginNumberLocal(String(p.personalNumber));
         }
