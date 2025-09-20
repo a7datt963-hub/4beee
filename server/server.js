@@ -1,7 +1,7 @@
 /**
  * server/server.js
  * نسخة معدّلة: إصلاحات login، charge, genericBotReplyHandler (charges)، poll loop، retry initSheets.
- * مضافة ميزة: loginNumber مخزّن في العمود G بورقة profiles1 (A..G)
+ * مضافة ميزة: loginNumber مخزّن في العمود G بورقة Profiles (A..G)
  */
 
 const express = require('express');
@@ -51,14 +51,14 @@ setInterval(() => {
 const SPREADSHEET_ID = process.env.SHEET_ID || null;
 
 /**
- * اقرأ صف البروفايل من شيت profiles1 (A..G) وترجعه كـ object أو null
+ * اقرأ صف البروفايل من شيت Profiles (A..G) وترجعه كـ object أو null
  */
 async function getProfileFromSheet(personal) {
   if (!sheetsClient || !SPREADSHEET_ID) return null;
   try {
     const resp = await sheetsClient.spreadsheets.values.get({
       spreadsheetId: SPREADSHEET_ID,
-      range: 'profiles1!A2:G10000',
+      range: 'Profiles!A2:G10000',
     });
     const rows = (resp.data && resp.data.values) || [];
     for (let i = 0; i < rows.length; i++) {
@@ -100,7 +100,7 @@ async function upsertProfileRow(profile) {
       profile.loginNumber != null ? String(profile.loginNumber) : ''
     ];
     if (existing && existing.rowIndex) {
-      const range = `profiles1!A${existing.rowIndex}:G${existing.rowIndex}`;
+      const range = `Profiles!A${existing.rowIndex}:G${existing.rowIndex}`;
       await sheetsClient.spreadsheets.values.update({
         spreadsheetId: SPREADSHEET_ID,
         range,
@@ -110,7 +110,7 @@ async function upsertProfileRow(profile) {
     } else {
       await sheetsClient.spreadsheets.values.append({
         spreadsheetId: SPREADSHEET_ID,
-        range: 'profiles1!A2:G2',
+        range: 'Profiles!A2:G2',
         valueInputOption: 'RAW',
         insertDataOption: 'INSERT_ROWS',
         requestBody: { values: [values] }
@@ -131,7 +131,7 @@ async function updateBalanceInSheet(personal, newBalance) {
   try {
     const existing = await getProfileFromSheet(personal);
     if (existing && existing.rowIndex) {
-      const range = `profiles1!F${existing.rowIndex}`;
+      const range = `Profiles!F${existing.rowIndex}`;
       await sheetsClient.spreadsheets.values.update({
         spreadsheetId: SPREADSHEET_ID,
         range,
@@ -150,12 +150,12 @@ async function updateBalanceInSheet(personal, newBalance) {
 }
 
 /**
- * يعين رقم دخول متسلسل في العمود G داخل profiles1
+ * يعين رقم دخول متسلسل في العمود G داخل Profiles
  * - إن وُجد رقم مسبقًا في الصف يرجع الرقم
  * - إذا لم يوجد، يحسب next = count(non-empty G) + 1، ثم يكتب الرقم في صف المستخدم (أو يضيف صف جديد)
  * - يرجع الرقم (Number) أو null لو فشل
  */
-async function assignLoginNumberInprofiles1Sheet(personal) {
+async function assignLoginNumberInProfilesSheet(personal) {
   if (!sheetsClient || !SPREADSHEET_ID) return null;
   try {
     const existing = await getProfileFromSheet(personal);
@@ -164,7 +164,7 @@ async function assignLoginNumberInprofiles1Sheet(personal) {
     // جلب كل قيم العمود G
     const resp = await sheetsClient.spreadsheets.values.get({
       spreadsheetId: SPREADSHEET_ID,
-      range: 'profiles1!G2:G10000',
+      range: 'Profiles!G2:G10000',
     });
     const rows = (resp.data && resp.data.values) || [];
 
@@ -177,7 +177,7 @@ async function assignLoginNumberInprofiles1Sheet(personal) {
 
     if (existing && existing.rowIndex) {
       // نكتب الرقم في عمود G لنفس الصف
-      const range = `profiles1!G${existing.rowIndex}`;
+      const range = `Profiles!G${existing.rowIndex}`;
       await sheetsClient.spreadsheets.values.update({
         spreadsheetId: SPREADSHEET_ID,
         range,
@@ -189,7 +189,7 @@ async function assignLoginNumberInprofiles1Sheet(personal) {
       // لم نجد صفًا مسبقًا — نضيف صفًا جديدًا (A..G) مع loginNumber
       await sheetsClient.spreadsheets.values.append({
         spreadsheetId: SPREADSHEET_ID,
-        range: 'profiles1!A2:G2',
+        range: 'Profiles!A2:G2',
         valueInputOption: 'RAW',
         insertDataOption: 'INSERT_ROWS',
         requestBody: { values: [[ String(personal), '', '', '', '', '0', String(nextNumber) ]] }
@@ -197,14 +197,14 @@ async function assignLoginNumberInprofiles1Sheet(personal) {
       return nextNumber;
     }
   } catch (e) {
-    console.warn('assignLoginNumberInprofiles1Sheet error', e);
+    console.warn('assignLoginNumberInProfilesSheet error', e);
     return null;
   }
 }
 
 /**
  * fallback محلي: لو Sheets غير متوفرة، نقوم بتعيين رقم دخول محلي
- * - يتحقق من DB.profiles1 إذا في رقم لهذا الشخص يرجعه
+ * - يتحقق من DB.profiles إذا في رقم لهذا الشخص يرجعه
  * - وإلا يحسب max(loginNumber) الموجود ويعطي التالي
  */
 function assignLoginNumberLocal(personal) {
@@ -214,7 +214,7 @@ function assignLoginNumberLocal(personal) {
   if (prof.loginNumber) return Number(prof.loginNumber);
 
   let maxNum = 0;
-  for (const p of DB.profiles1) {
+  for (const p of DB.profiles) {
     const n = Number(p.loginNumber || 0);
     if (!isNaN(n) && n > maxNum) maxNum = n;
   }
@@ -259,7 +259,7 @@ function loadData(){
   try{
     if(!fs.existsSync(DATA_FILE)){
       const init = {
-        profiles1: [],
+        profiles: [],
         orders: [],
         charges: [],
         offers: [],
@@ -275,20 +275,20 @@ function loadData(){
     return JSON.parse(raw || '{}');
   }catch(e){
     console.error('loadData error', e);
-    return { profiles1:[], orders:[], charges:[], offers:[], notifications:[], profileEditRequests:{}, blocked:[], tgOffsets:{} };
+    return { profiles:[], orders:[], charges:[], offers:[], notifications:[], profileEditRequests:{}, blocked:[], tgOffsets:{} };
   }
 }
 function saveData(d){ try{ fs.writeFileSync(DATA_FILE, JSON.stringify(d, null, 2)); }catch(e){ console.error('saveData error', e); } }
 let DB = loadData();
 
 function findProfileByPersonal(n){
-  return DB.profiles1.find(p => String(p.personalNumber) === String(n)) || null;
+  return DB.profiles.find(p => String(p.personalNumber) === String(n)) || null;
 }
 function ensureProfile(personal){
   let p = findProfileByPersonal(personal);
   if(!p){
     p = { personalNumber: String(personal), name: 'ضيف', email:'', phone:'', password:'', balance: 0, canEdit:false };
-    DB.profiles1.push(p); saveData(DB);
+    DB.profiles.push(p); saveData(DB);
   } else {
     if(typeof p.balance === 'undefined') p.balance = 0;
   }
@@ -356,7 +356,7 @@ app.post('/api/register', async (req,res)=>{
   let p = findProfileByPersonal(personalNumber);
   if(!p){
     p = { personalNumber: String(personalNumber), name:name||'غير معروف', email:email||'', password:password||'', phone:phone||'', balance:0, canEdit:false };
-    DB.profiles1.push(p);
+    DB.profiles.push(p);
   } else {
     p.name = name || p.name;
     p.email = email || p.email;
@@ -389,7 +389,7 @@ app.post('/api/login', async (req, res) => {
     // إيجاد البروفايل
     let p = null;
     if (personalKey) p = findProfileByPersonal(personalKey);
-    else if (email) p = DB.profiles1.find(x => x.email && x.email.toLowerCase() === String(email).toLowerCase()) || null;
+    else if (email) p = DB.profiles.find(x => x.email && x.email.toLowerCase() === String(email).toLowerCase()) || null;
 
     // إذا لم يوجد: أنشئ بروفايل جديد مع ضمان رقم شخصي 7 خانات
     if (!p) {
@@ -406,7 +406,7 @@ app.post('/api/login', async (req, res) => {
         balance: 0,
         canEdit: false
       };
-      DB.profiles1.push(p);
+      DB.profiles.push(p);
       saveData(DB);
       try { upsertProfileRow && upsertProfileRow(p).catch(()=>{}); } catch(e){}
     } else {
@@ -438,7 +438,7 @@ app.post('/api/login', async (req, res) => {
     try {
       if (!p.loginNumber) {
         let assigned = null;
-        try { assigned = await assignLoginNumberInprofiles1Sheet(String(p.personalNumber)); } catch(e){ assigned = null; }
+        try { assigned = await assignLoginNumberInProfilesSheet(String(p.personalNumber)); } catch(e){ assigned = null; }
         if (assigned) {
           p.loginNumber = Number(assigned);
           upsertProfileRow && upsertProfileRow(p).catch(()=>{});
@@ -892,11 +892,11 @@ async function pollAllBots(){
 setInterval(pollAllBots, 10000);
 
 // debug endpoints
-app.get('/api/debug/db', (req,res)=> res.json({ ok:true, size: { profiles1: DB.profiles1.length, orders: DB.orders.length, charges: DB.charges.length, offers: DB.offers.length, notifications: (DB.notifications||[]).length }, tgOffsets: DB.tgOffsets || {} }));
+app.get('/api/debug/db', (req,res)=> res.json({ ok:true, size: { profiles: DB.profiles.length, orders: DB.orders.length, charges: DB.charges.length, offers: DB.offers.length, notifications: (DB.notifications||[]).length }, tgOffsets: DB.tgOffsets || {} }));
 app.post('/api/debug/clear-updates', (req,res)=>{ DB.tgOffsets = {}; saveData(DB); res.json({ok:true}); });
 
 app.listen(PORT, ()=> {
   console.log(`Server listening on ${PORT}`);
   DB = loadData();
-  console.log('DB loaded items:', DB.profiles1.length, 'profiles1');
+  console.log('DB loaded items:', DB.profiles.length, 'profiles');
 });
