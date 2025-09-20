@@ -1016,6 +1016,110 @@ setInterval(pollAllBots, 10000);
 app.get('/api/debug/db', (req,res)=> res.json({ ok:true, size: { profiles: DB.profiles.length, orders: DB.orders.length, charges: DB.charges.length, offers: DB.offers.length, notifications: (DB.notifications||[]).length }, tgOffsets: DB.tgOffsets || {} }));
 app.post('/api/debug/clear-updates', (req,res)=>{ DB.tgOffsets = {}; saveData(DB); res.json({ok:true}); });
 
+// ----------------- Add to server.js -----------------
+
+// Check whether a profile exists in Google Sheets (returns sheet row if found)
+// Accepts: ?personal=xxxx أو ?email=xxx
+app.get('/api/profile/check', async (req, res) => {
+  try {
+    const personal = req.query.personal || null;
+    const email = (req.query.email || '').toString().trim().toLowerCase();
+
+    if (!personal && !email) return res.json({ ok:false, error:'missing_personal_or_email' });
+
+    // if have personal -> check sheet by personal
+    if (personal) {
+      const sheetProf = await getProfileFromSheet(String(personal));
+      if (sheetProf) return res.json({ ok:true, found:true, sheetProfile: sheetProf });
+      return res.json({ ok:true, found:false });
+    }
+
+    // otherwise search sheet by email (scan)
+    if (email) {
+      const resp = await (sheetsClient && SPREADSHEET_ID ? sheetsClient.spreadsheets.values.get({
+        spreadsheetId: SPREADSHEET_ID,
+        range: 'Profiles!A2:G10000',
+      }) : Promise.resolve({ data:{ values: [] } }));
+      const rows = (resp.data && resp.data.values) || [];
+      for (let i=0;i<rows.length;i++){
+        const r = rows[i];
+        const rEmail = (r[2] || '').toString().trim().toLowerCase();
+        if (rEmail && rEmail === email) {
+          const sheetProf = {
+            rowIndex: i + 2,
+            personalNumber: r[0] || '',
+            name: r[1] || '',
+            email: r[2] || '',
+            password: r[3] || '',
+            phone: r[4] || '',
+            balance: Number(r[5] || 0),
+            loginNumber: (r[6] != null && String(r[6]).trim() !== '') ? Number(r[6]) : null
+          };
+          return res.json({ ok:true, found:true, sheetProfile });
+        }
+      }
+      return res.json({ ok:true, found:false });
+    }
+
+    return res.json({ ok:false, error:'unexpected' });
+  } catch (e) {
+    console.warn('profile/check error', e);
+    return res.status(500).json({ ok:false, error:'server_error' });
+  }
+});
+
+// Get (and sync) a profile from DB + Google Sheets
+// GET /api/profile?personal=XXXX
+app.get('/api/profile', async (req, res) => {
+  try {
+    const personal = (req.query.personal || req.query.personalNumber || '').toString();
+    if (!personal) return res.status(400).json({ ok:false, error:'missing_personal' });
+
+    // local
+    let local = findProfileByPersonal(personal);
+    if (!local) {
+      // create minimal local profile if missing
+      local = { personalNumber: String(personal), name:'ضيف', email:'', password:'', phone:'', balance:0 };
+      DB.profiles.push(local); saveData(DB);
+    }
+
+    // try load from sheet and merge (sheet overwrites local for authoritative fields)
+    try {
+      const sheetProf = await getProfileFromSheet(String(personal));
+      if (sheetProf) {
+        // merge sheet -> local
+        local.name = sheetProf.name || local.name;
+        local.email = sheetProf.email || local.email;
+        local.password = sheetProf.password || local.password;
+        local.phone = sheetProf.phone || local.phone;
+        local.balance = Number(sheetProf.balance || 0);
+        if (sheetProf.loginNumber) local.loginNumber = Number(sheetProf.loginNumber);
+        saveData(DB);
+      } else {
+        // not in sheet: do not auto-insert here (client may ask to create)
+      }
+    } catch(err) {
+      console.warn('profile sync error', err);
+    }
+
+    // return canonical profile
+    return res.json({ ok:true, profile: {
+      personalNumber: local.personalNumber,
+      name: local.name || '',
+      email: local.email || '',
+      password: local.password || '',
+      phone: local.phone || '',
+      balance: Number(local.balance || 0),
+      loginNumber: local.loginNumber || null
+    }});
+  } catch (e) {
+    console.error('GET /api/profile error', e);
+    return res.status(500).json({ ok:false, error:'server_error' });
+  }
+});
+
+// ----------------- end server.js additions -----------------
+
 app.listen(PORT, ()=> {
   console.log(`Server listening on ${PORT}`);
   DB = loadData();
