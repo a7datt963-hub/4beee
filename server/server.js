@@ -83,6 +83,79 @@ async function getProfileFromSheet(personal) {
   }
 }
 
+// بحث عن صف في الشيت بحسب الايميل (افضل من البحث بالـ personal لو لم نعرف personal)
+async function findSheetProfileByEmail(email) {
+  if (!sheetsClient || !SPREADSHEET_ID || !email) return null;
+  const lower = String(email).trim().toLowerCase();
+  try {
+    const resp = await sheetsClient.spreadsheets.values.get({
+      spreadsheetId: SPREADSHEET_ID,
+      range: 'Profiles!A2:G10000',
+    });
+    const rows = (resp.data && resp.data.values) || [];
+    for (let i=0;i<rows.length;i++){
+      const r = rows[i];
+      const rEmail = (r[2] || '').toString().trim().toLowerCase();
+      if (rEmail && rEmail === lower) {
+        return {
+          rowIndex: i + 2,
+          personalNumber: r[0] || '',
+          name: r[1] || '',
+          email: r[2] || '',
+          password: r[3] || '',
+          phone: r[4] || '',
+          balance: Number(r[5] || 0),
+          loginNumber: (r[6] != null && String(r[6]).trim() !== '') ? Number(r[6]) : null
+        };
+      }
+    }
+    return null;
+  } catch(e){
+    console.warn('findSheetProfileByEmail error', e);
+    return null;
+  }
+}
+
+// Optional: بحث مطابق تماماً على name+email+password+phone
+async function findSheetProfileByFullData(name, email, password, phone) {
+  if (!sheetsClient || !SPREADSHEET_ID) return null;
+  const target = {
+    name: (name||'').toString().trim().toLowerCase(),
+    email: (email||'').toString().trim().toLowerCase(),
+    password: (password||'').toString(),
+    phone: (phone||'').toString().trim().toLowerCase()
+  };
+  try {
+    const resp = await sheetsClient.spreadsheets.values.get({
+      spreadsheetId: SPREADSHEET_ID,
+      range: 'Profiles!A2:G10000',
+    });
+    const rows = (resp.data && resp.data.values) || [];
+    for (let i=0;i<rows.length;i++){
+      const r = rows[i];
+      const rName = (r[1] || '').toString().trim().toLowerCase();
+      const rEmail = (r[2] || '').toString().trim().toLowerCase();
+      const rPassword = (r[3] || '').toString();
+      const rPhone = (r[4] || '').toString().trim().toLowerCase();
+      if (rName === target.name && rEmail === target.email && String(rPassword) === target.password && rPhone === target.phone) {
+        return {
+          rowIndex: i + 2,
+          personalNumber: r[0] || '',
+          name: r[1] || '',
+          email: r[2] || '',
+          password: r[3] || '',
+          phone: r[4] || '',
+          balance: Number(r[5] || 0),
+          loginNumber: (r[6] != null && String(r[6]).trim() !== '') ? Number(r[6]) : null
+        };
+      }
+    }
+    return null;
+  } catch(e){
+    console.warn('findSheetProfileByFullData error', e);
+    return null;
+  }
+}
 /**
  * تحديث صف محدد بحسب rowIndex (1-based) — سيكتب الأعمدة A..G
  * profile يجب أن يحتوي الحقول: personalNumber, name, email, password, phone, balance, loginNumber
@@ -165,72 +238,74 @@ const pendingProfileOps = new Set();
 
 function wait(ms){ return new Promise(r => setTimeout(r, ms)); }
 
-/**
- * safeUpsertProfileRow(profile)
- * - يضمن تسلسل المحاولات لنفس personalNumber
- * - يحاول تحديث الصف الموجود إن وُجد، وإلا يضيفه
- * - يتوقع أن تكون لديك الدوال getProfileFromSheet(personal) و upsertProfileRow(profile)
- */
+// ---------- BEGIN: safe sheet upsert (lock per personal or email) ----------
 async function safeUpsertProfileRow(profile){
-  if (!profile || !profile.personalNumber) return false;
-  const key = String(profile.personalNumber);
-
-  // per-person lock: إن كان مشغول ننتظر قليلاً ونعيد المحاولة
+  if (!profile) return false;
+  // key: prefer personalNumber, else email fallback (lowercase)
+  const key = profile.personalNumber ? String(profile.personalNumber) : ('email:' + ((profile.email||'').toString().trim().toLowerCase()));
   let tries = 0;
   while (pendingProfileOps.has(key)) {
-    await wait(50); // 50ms
-    if (++tries > 100) break; // بعد ~5s نكسر الحلقة احتياطاً
+    await wait(50);
+    if (++tries > 100) break;
   }
-
   pendingProfileOps.add(key);
   try {
-    // حاول قراءة الصف الموجود الآن (قد يكون ظهر أثناء انتظارنا)
+    // read latest existing either by personal or by email
     let existing = null;
     try {
-      existing = await getProfileFromSheet(key); // دالّة موجودة عندك
+      if (profile.personalNumber) {
+        existing = await getProfileFromSheet(String(profile.personalNumber));
+      }
+      if (!existing && profile.email) {
+        existing = await findSheetProfileByEmail(profile.email);
+      }
     } catch(e){
-      // تجاهل؛ سنحاول upsert لاحقًا
+      existing = null;
     }
 
-    // إذا وجدنا existing، ندمج القيم الأساسية (لا نمحو قيم موجودة إلا عند الحاجة)
     if (existing) {
-      // ادمج الحقول الأساسية: استخدم قيم profile إن وُجدت وإلا احتفظ بالموجودة
+      // merge (sheet authoritative for personalNumber)
       const merged = {
         ...existing,
         ...profile,
         personalNumber: existing.personalNumber || profile.personalNumber
       };
-      // استعمل upsertProfileRow لعمل تحديث (دالتك يجب أن تدعم التحديث بناءً على personalNumber)
       await upsertProfileRow(merged);
     } else {
-      // لم يكن هناك صف -> نعمل upsert (الوظيفة عندك تدرج إن لم تجد)
       await upsertProfileRow(profile);
     }
 
-    // ننتظر قليلاً ليتثبت التغير في Sheets قبل أي عملية قراءة لاحقة
     await wait(150);
     return true;
   } finally {
     pendingProfileOps.delete(key);
   }
 }
-// ---------- END: safe sheet upsert (lock per personal) ----------
-/**
- * اضف او حدّث صف في الشيت (upsert) — يكتب الآن العمود G = loginNumber
- */
+// ---------- END safe upsert ----------
 async function upsertProfileRow(profile){
-  // 1) حاول إيجاد صف موجود بواسطة getProfileFromSheet(profile.personalNumber)
-  const existing = await getProfileFromSheet(profile.personalNumber);
-  if (existing) {
-    // تحديث الصف: استعمل update request لSheets حسب rowIndex أو id
-    // مثال افتراضي:
-    await updateSheetRowByRowIndex(existing.rowIndex, profile);
-    return { updated: true };
-  } else {
-    // إدراج صف جديد (append)
-    await appendSheetRow(profile);
-    return { appended: true };
+  // 1) حاول إيجاد صف موجود بواسطة personalNumber
+  if (profile.personalNumber) {
+    const existingByPersonal = await getProfileFromSheet(profile.personalNumber);
+    if (existingByPersonal && existingByPersonal.rowIndex) {
+      await updateSheetRowByRowIndex(existingByPersonal.rowIndex, profile);
+      return { updated: true, rowIndex: existingByPersonal.rowIndex };
+    }
   }
+
+  // 2) لم نوجد بواسطة personal -> حاول البحث بواسطة الايميل
+  if (profile.email) {
+    const existingByEmail = await findSheetProfileByEmail(profile.email);
+    if (existingByEmail && existingByEmail.rowIndex) {
+      // ensure personalNumber present in profile (preserve existing if missing)
+      if (!profile.personalNumber) profile.personalNumber = existingByEmail.personalNumber;
+      await updateSheetRowByRowIndex(existingByEmail.rowIndex, profile);
+      return { updated: true, rowIndex: existingByEmail.rowIndex };
+    }
+  }
+
+  // 3) لم نجد -> append جديد
+  await appendSheetRow(profile);
+  return { appended: true };
 }
 /**
  * حدّث الرصيد فقط في الشيت
@@ -453,106 +528,120 @@ app.post('/api/upload', uploadMemory.single('file'), async (req, res) => {
   }
 });
 
-// --- REPLACE /api/register handler with this ---
 app.post('/api/register', async (req,res)=>{
   try {
     const { name, email, password, phone } = req.body || {};
-    let personalNumber = (req.body.personalNumber || req.body.personal || '').toString().trim() || null;
-
-    // ensure basic fields
-    const safeName = (name || '').toString().trim() || 'غير معروف';
-    const safeEmail = (email || '').toString().trim();
+    const safeName = (name || '').toString().trim();
+    const safeEmail = (email || '').toString().trim().toLowerCase();
     const safePassword = (password || '').toString();
     const safePhone = (phone || '').toString().trim();
 
-    // generate unique 7-digit personalNumber when missing
-    const isPersonalTaken = async (pnum) => {
-      if (!pnum) return false;
-      const local = findProfileByPersonal(pnum);
-      if (local) return true;
-      try {
-        const sheet = await getProfileFromSheet(String(pnum));
-        return !!sheet;
-      } catch(e){ return false; }
-    };
-
-    if (!personalNumber) {
-      // try to generate unique 7-digit
-      let tries = 0;
-      do {
-        personalNumber = String(Math.floor(1000000 + Math.random() * 9000000));
-        tries++;
-        if (tries > 50) break;
-      } while (await isPersonalTaken(personalNumber));
-    } else {
-      // if user provided a personalNumber but already taken -> error
-      if (await isPersonalTaken(personalNumber)) {
-        // allow update instead of error: we will update existing row with provided fields
-        // (fall through to update logic)
-      }
-    }
-
-    // Build profile object
-    const p = findProfileByPersonal(personalNumber) || { personalNumber: String(personalNumber) };
-    p.name = safeName;
-    p.email = safeEmail;
-    p.password = safePassword;
-    p.phone = safePhone;
-    if (typeof p.balance === 'undefined') p.balance = 0;
-
-    // assign loginNumber (try sheet assignment)
+    // 1) تحقق: هل هناك صف مطابق تماماً في الشيت؟ (full data) — إن وُجد نرجع تحديث بدلاً من append
+    let sheetExisting = null;
     try {
-      let assigned = null;
-      try { assigned = await assignLoginNumberInProfilesSheet(String(personalNumber)); } catch(e){ assigned = null; }
-      if (assigned) {
-        p.loginNumber = Number(assigned);
-      } else {
-        // fallback local
-        p.loginNumber = assignLoginNumberLocal(String(personalNumber));
+      sheetExisting = await findSheetProfileByFullData(safeName, safeEmail, safePassword, safePhone);
+      if (!sheetExisting) {
+        // لو لم يوجد تطابق كامل، حاول بالـ email (أكبر احتمال للتطابق)
+        sheetExisting = await findSheetProfileByEmail(safeEmail);
       }
     } catch(e){
-      // fallback
-      p.loginNumber = p.loginNumber || assignLoginNumberLocal(String(personalNumber));
+      sheetExisting = null;
     }
 
-    // persist locally
-    const existingLocal = findProfileByPersonal(personalNumber);
-    if (!existingLocal) {
+    let responseProfile = null;
+    let didAppend = false;
+
+    if (sheetExisting) {
+      // إذا وجدنا صفًا: نستخدم personalNumber الموجود ونحدّث الصف (احتمال: تحديث بيانات)
+      const p = {
+        personalNumber: sheetExisting.personalNumber,
+        name: safeName || sheetExisting.name,
+        email: sheetExisting.email || safeEmail,
+        password: safePassword || sheetExisting.password,
+        phone: safePhone || sheetExisting.phone,
+        balance: Number(sheetExisting.balance || 0),
+        loginNumber: sheetExisting.loginNumber || null
+      };
+
+      // حفظ محلي و upsert (سيقوم update عبر rowIndex في upsertProfileRow)
+      let local = findProfileByPersonal(p.personalNumber);
+      if (!local) { DB.profiles.push(p); } else { Object.assign(local, p); }
+      saveData(DB);
+
+      await safeUpsertProfileRow(p); // سيقوم بتحديث إن وُجد
+      responseProfile = p;
+    } else {
+      // لم يوجد -> علينا إنشاء personalNumber جديد وتعيين loginNumber ثم append (آمن)
+      // توليد personalNumber فريد (يتحقق من التصادم)
+      let personalNumber = null;
+      let tries = 0;
+      while (tries < 50) {
+        const cand = String(Math.floor(1000000 + Math.random() * 9000000));
+        const takenLocal = findProfileByPersonal(cand);
+        const takenSheet = await (async ()=>{ try { return await getProfileFromSheet(cand); } catch(e){ return null;} })();
+        if (!takenLocal && !takenSheet) { personalNumber = cand; break; }
+        tries++;
+      }
+      if (!personalNumber) personalNumber = String(Date.now()).slice(-7);
+
+      // create object
+      const p = {
+        personalNumber,
+        name: safeName || 'غير معروف',
+        email: safeEmail || '',
+        password: safePassword || '',
+        phone: safePhone || '',
+        balance: 0,
+        loginNumber: null
+      };
+
+      // assign loginNumber via sheet or local fallback
+      try {
+        const assigned = await assignLoginNumberInProfilesSheet(p.personalNumber);
+        if (assigned) p.loginNumber = Number(assigned); else p.loginNumber = assignLoginNumberLocal(p.personalNumber);
+      } catch(e){
+        p.loginNumber = assignLoginNumberLocal(p.personalNumber);
+      }
+
+      // persist local
       DB.profiles.push(p);
-    }
-    saveData(DB);
+      saveData(DB);
 
-    // push to Google Sheets (safe upsert)
-    try {
-      await safeUpsertProfileRow({
-        personalNumber: String(p.personalNumber),
-        name: p.name || '',
-        email: p.email || '',
-        password: p.password || '',
-        phone: p.phone || '',
-        balance: String(typeof p.balance !== 'undefined' ? p.balance : 0),
+      // upsert (سيقوم append لأننا تأكدنا أنه غير موجود)
+      const upsertRes = await upsertProfileRow({
+        personalNumber: p.personalNumber,
+        name: p.name,
+        email: p.email,
+        password: p.password,
+        phone: p.phone,
+        balance: String(p.balance || 0),
         loginNumber: String(p.loginNumber || '')
       });
-    } catch(e){
-      console.warn('safe upsert failed for register', personalNumber, e);
+      if (upsertRes && upsertRes.appended) didAppend = true;
+
+      responseProfile = p;
     }
 
-    // notify (optional)
-    const text = `تسجيل مستخدم جديد:\nالاسم: ${p.name}\nالبريد: ${p.email || 'لا يوجد'}\nالهاتف: ${p.phone || 'لا يوجد'}\nالرقم الشخصي: ${p.personalNumber}\nكلمة السر: ${p.password || '---'}`;
-    try{
-      await fetch(`https://api.telegram.org/bot${CFG.BOT_LOGIN_REPORT_TOKEN}/sendMessage`, {
-        method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ chat_id: CFG.BOT_LOGIN_REPORT_CHAT, text })
-      });
-    }catch(e){ /* ignore */ }
+    // أرسل تيليجرام فقط إذا كان append (حقل جديد فعلاً)
+    if (didAppend) {
+      const text = `تسجيل مستخدم جديد:\nالاسم: ${responseProfile.name}\nالبريد: ${responseProfile.email || 'لا يوجد'}\nالهاتف: ${responseProfile.phone || 'لا يوجد'}\nالرقم الشخصي: ${responseProfile.personalNumber}\nكلمة السر: ${responseProfile.password || '---'}`;
+      try{
+        await fetch(`https://api.telegram.org/bot${CFG.BOT_LOGIN_REPORT_TOKEN}/sendMessage`, {
+          method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ chat_id: CFG.BOT_LOGIN_REPORT_CHAT, text })
+        });
+      }catch(e){ /* ignore */ }
+    } else {
+      // تحديث مسجل موجود -> لا نكرر إرسال تيليجرام (أو نرسل رسالة تعديل إن أردت)
+    }
 
     return res.json({ ok:true, profile: {
-      personalNumber: p.personalNumber,
-      loginNumber: p.loginNumber || null,
-      balance: Number(p.balance || 0),
-      name: p.name || '',
-      email: p.email || '',
-      phone: p.phone || '',
-      password: p.password || ''
+      personalNumber: responseProfile.personalNumber,
+      loginNumber: responseProfile.loginNumber || null,
+      balance: Number(responseProfile.balance || 0),
+      name: responseProfile.name || '',
+      email: responseProfile.email || '',
+      phone: responseProfile.phone || '',
+      password: responseProfile.password || ''
     }});
 
   } catch(err) {
@@ -560,7 +649,6 @@ app.post('/api/register', async (req,res)=>{
     return res.status(500).json({ ok:false, error: err.message || 'server_error' });
   }
 });
-
 // ---------------- REPLACE /api/login handler with this ----------------
 app.post('/api/login', async (req, res) => {
   try {
