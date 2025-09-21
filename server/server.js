@@ -649,7 +649,6 @@ app.post('/api/register', async (req,res)=>{
     return res.status(500).json({ ok:false, error: err.message || 'server_error' });
   }
 });
-
 // ---------------- REPLACE /api/login handler with this ----------------
 app.post('/api/login', async (req, res) => {
   try {
@@ -700,15 +699,6 @@ app.post('/api/login', async (req, res) => {
             if (sheetProf.loginNumber) local.loginNumber = sheetProf.loginNumber;
             saveData(DB);
           }
-
-          // non-blocking notify telegram (do not block response)
-          try {
-            const text = `تسجيل دخول:\nالاسم: ${local.name || 'غير معروف'}\nالرقم الشخصي: ${local.personalNumber}\nالبريد: ${local.email || 'لا يوجد'}\nالهاتف: ${local.phone || 'لا يوجد'}\nرقم الدخول: ${local.loginNumber || '---'}\nالوقت: ${new Date().toLocaleString()}`;
-            sendTelegramWithTimeout(CFG.BOT_LOGIN_REPORT_TOKEN, CFG.BOT_LOGIN_REPORT_CHAT, text, 3000)
-              .then(r => console.log('login telegram result:', r))
-              .catch(e => console.warn('login telegram error:', e));
-          } catch(e){ console.warn('login notify error', e); }
-
           return res.json({ ok:true, found:true, profile: buildOut(local) });
         } else {
           // not found by personal number
@@ -724,6 +714,12 @@ app.post('/api/login', async (req, res) => {
     }
 
     // 2) No personalKey -> search Google Sheets (A..G) for a row matching the provided non-empty fields.
+    //    Matching rules: for each provided query field we require equality:
+    //      - name/email/phone: case-insensitive trim equality
+    //      - password: exact equality (string)
+    // If sheets unavailable, fallback search local DB with same rules.
+
+    // Fallback local search (used if sheets client missing or query fails)
     const localSearch = () => {
       const found = DB.profiles.find(r => {
         if (qEmail && (!r.email || String(r.email).trim().toLowerCase() !== qEmail.toLowerCase())) return false;
@@ -810,17 +806,6 @@ app.post('/api/login', async (req, res) => {
         if (matched.loginNumber) local.loginNumber = matched.loginNumber;
       }
       saveData(DB);
-
-      // send telegram notify (non-blocking)
-      try {
-        const text = `تسجيل دخول (مطابق):\nالاسم: ${local.name || 'غير معروف'}\nالرقم الشخصي: ${local.personalNumber}\nالبريد: ${local.email || 'لا يوجد'}\nالهاتف: ${local.phone || 'لا يوجد'}\nرقم الدخول: ${local.loginNumber || '---'}\nالوقت: ${new Date().toLocaleString()}`;
-        sendTelegramWithTimeout(CFG.BOT_LOGIN_REPORT_TOKEN, CFG.BOT_LOGIN_REPORT_CHAT, text, 3000)
-          .then(r => console.log('login telegram result:', r))
-          .catch(e => console.warn('login telegram error:', e));
-      } catch(e){
-        console.warn('login notify error', e);
-      }
-
       return res.json({ ok:true, found:true, profile: buildOut(local) });
     }
 
@@ -832,7 +817,7 @@ app.post('/api/login', async (req, res) => {
     return res.status(500).json({ ok:false, error: err.message || 'server_error' });
   }
 });
-// ---------------- END /api/login handler ----------------
+// ---------------- END replacement ----------------
 
 app.get('/api/profile/:personal', (req,res)=>{
   const p = findProfileByPersonal(req.params.personal);
