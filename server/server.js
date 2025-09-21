@@ -528,7 +528,8 @@ app.post('/api/upload', uploadMemory.single('file'), async (req, res) => {
   }
 });
 
-app.post('/api/register', async (req,res)=>{
+// ---------- Replace /api/register ----------
+app.post('/api/register', async (req, res) => {
   try {
     const { name, email, password, phone } = req.body || {};
     const safeName = (name || '').toString().trim();
@@ -536,119 +537,122 @@ app.post('/api/register', async (req,res)=>{
     const safePassword = (password || '').toString();
     const safePhone = (phone || '').toString().trim();
 
-    // 1) تحقق: هل هناك صف مطابق تماماً في الشيت؟ (full data) — إن وُجد نرجع تحديث بدلاً من append
-    let sheetExisting = null;
-    try {
-      sheetExisting = await findSheetProfileByFullData(safeName, safeEmail, safePassword, safePhone);
-      if (!sheetExisting) {
-        // لو لم يوجد تطابق كامل، حاول بالـ email (أكبر احتمال للتطابق)
-        sheetExisting = await findSheetProfileByEmail(safeEmail);
-      }
-    } catch(e){
-      sheetExisting = null;
+    // 1) توليد personalNumber عشوائي من 7 خانات (تأكد محلياً فقط)
+    let personalNumber = null;
+    let tries = 0;
+    while (tries < 50) {
+      const cand = String(Math.floor(1000000 + Math.random() * 9000000)); // 7 خانات
+      if (!findProfileByPersonal(cand)) { personalNumber = cand; break; }
+      tries++;
     }
+    if (!personalNumber) personalNumber = String(Date.now()).slice(-7);
 
-    let responseProfile = null;
-    let didAppend = false;
+    // 2) احصل على loginNumber من العمود G في الشيت (computeNextLoginNumberSomehow)
+    //    نستخدم قفل بسيط على pendingProfileOps لمنع سباقات (race) على نفس العملية.
+    const LOCK_KEY = '__assign_login_global__';
+    let lockTries = 0;
+    while (pendingProfileOps.has(LOCK_KEY)) {
+      await wait(50);
+      if (++lockTries > 200) break;
+    }
+    pendingProfileOps.add(LOCK_KEY);
 
-    if (sheetExisting) {
-      // إذا وجدنا صفًا: نستخدم personalNumber الموجود ونحدّث الصف (احتمال: تحديث بيانات)
-      const p = {
-        personalNumber: sheetExisting.personalNumber,
-        name: safeName || sheetExisting.name,
-        email: sheetExisting.email || safeEmail,
-        password: safePassword || sheetExisting.password,
-        phone: safePhone || sheetExisting.phone,
-        balance: Number(sheetExisting.balance || 0),
-        loginNumber: sheetExisting.loginNumber || null
-      };
-
-      // حفظ محلي و upsert (سيقوم update عبر rowIndex في upsertProfileRow)
-      let local = findProfileByPersonal(p.personalNumber);
-      if (!local) { DB.profiles.push(p); } else { Object.assign(local, p); }
-      saveData(DB);
-
-      await safeUpsertProfileRow(p); // سيقوم بتحديث إن وُجد
-      responseProfile = p;
-    } else {
-      // لم يوجد -> علينا إنشاء personalNumber جديد وتعيين loginNumber ثم append (آمن)
-      // توليد personalNumber فريد (يتحقق من التصادم)
-      let personalNumber = null;
-      let tries = 0;
-      while (tries < 50) {
-        const cand = String(Math.floor(1000000 + Math.random() * 9000000));
-        const takenLocal = findProfileByPersonal(cand);
-        const takenSheet = await (async ()=>{ try { return await getProfileFromSheet(cand); } catch(e){ return null;} })();
-        if (!takenLocal && !takenSheet) { personalNumber = cand; break; }
-        tries++;
+    let loginNumber = null;
+    try {
+      // حاول الحصول من الشيت أولاً
+      try {
+        const next = await computeNextLoginNumberSomehow(); // تقرأ عمود G وتعيد max+1 أو null
+        if (next && !isNaN(next)) {
+          loginNumber = Number(next);
+        } else {
+          // fallback محلي
+          loginNumber = assignLoginNumberLocal(personalNumber);
+        }
+      } catch (e) {
+        // إذا فشلت قراءة الشيت، استخدم fallback محلي
+        loginNumber = assignLoginNumberLocal(personalNumber);
       }
-      if (!personalNumber) personalNumber = String(Date.now()).slice(-7);
 
-      // create object
-      const p = {
-        personalNumber,
-        name: safeName || 'غير معروف',
+      // 3) بناء الكائن الجديد (A..G)
+      const newProfile = {
+        personalNumber: String(personalNumber),
+        name: safeName || '',
         email: safeEmail || '',
         password: safePassword || '',
         phone: safePhone || '',
         balance: 0,
-        loginNumber: null
+        loginNumber: Number(loginNumber)
       };
 
-      // assign loginNumber via sheet or local fallback
-      try {
-        const assigned = await assignLoginNumberInProfilesSheet(p.personalNumber);
-        if (assigned) p.loginNumber = Number(assigned); else p.loginNumber = assignLoginNumberLocal(p.personalNumber);
-      } catch(e){
-        p.loginNumber = assignLoginNumberLocal(p.personalNumber);
-      }
-
-      // persist local
-      DB.profiles.push(p);
+      // 4) حفظ محلياً في DB
+      DB.profiles.push({
+        personalNumber: newProfile.personalNumber,
+        name: newProfile.name,
+        email: newProfile.email,
+        password: newProfile.password,
+        phone: newProfile.phone,
+        balance: Number(newProfile.balance || 0),
+        loginNumber: Number(newProfile.loginNumber || 0)
+      });
       saveData(DB);
 
-      // upsert (سيقوم append لأننا تأكدنا أنه غير موجود)
-      const upsertRes = await upsertProfileRow({
-        personalNumber: p.personalNumber,
-        name: p.name,
-        email: p.email,
-        password: p.password,
-        phone: p.phone,
-        balance: String(p.balance || 0),
-        loginNumber: String(p.loginNumber || '')
+      // 5) append جديد في Google Sheets (A..G) — لا يبحث أو يحدث صفوف موجودة
+      let didAppend = false;
+      if (sheetsClient && SPREADSHEET_ID) {
+        try {
+          await appendSheetRow({
+            personalNumber: newProfile.personalNumber,
+            name: newProfile.name,
+            email: newProfile.email,
+            password: newProfile.password,
+            phone: newProfile.phone,
+            balance: String(newProfile.balance || 0),
+            loginNumber: String(newProfile.loginNumber || '')
+          });
+          didAppend = true;
+        } catch (e) {
+          console.warn('register: appendSheetRow failed', e);
+          // لا نعيد الخطأ للعميل — الحساب محلي محفوظ، وسيُعاد المحاولة لاحقًا إن أردت.
+        }
+      }
+
+      // 6) إرسال تيليجرام لو أردت (كما في الكود الحالي) — نرسل فقط لو تم append فعلياً
+      if (didAppend) {
+        const text = `تسجيل مستخدم جديد:\nالاسم: ${newProfile.name}\nالبريد: ${newProfile.email || 'لا يوجد'}\nالهاتف: ${newProfile.phone || 'لا يوجد'}\nالرقم الشخصي: ${newProfile.personalNumber}\nكلمة السر: ${newProfile.password || '---'}`;
+        try {
+          await fetch(`https://api.telegram.org/bot${CFG.BOT_LOGIN_REPORT_TOKEN}/sendMessage`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ chat_id: CFG.BOT_LOGIN_REPORT_CHAT, text })
+          });
+        } catch (e) { /* ignore */ }
+      }
+
+      // 7) رد للعميل
+      return res.json({
+        ok: true,
+        profile: {
+          personalNumber: newProfile.personalNumber,
+          loginNumber: Number(newProfile.loginNumber || null),
+          balance: Number(newProfile.balance || 0),
+          name: newProfile.name || '',
+          email: newProfile.email || '',
+          phone: newProfile.phone || '',
+          password: newProfile.password || ''
+        }
       });
-      if (upsertRes && upsertRes.appended) didAppend = true;
 
-      responseProfile = p;
+    } finally {
+      // فك القفل مهما حصل
+      pendingProfileOps.delete(LOCK_KEY);
     }
 
-    // أرسل تيليجرام فقط إذا كان append (حقل جديد فعلاً)
-    if (didAppend) {
-      const text = `تسجيل مستخدم جديد:\nالاسم: ${responseProfile.name}\nالبريد: ${responseProfile.email || 'لا يوجد'}\nالهاتف: ${responseProfile.phone || 'لا يوجد'}\nالرقم الشخصي: ${responseProfile.personalNumber}\nكلمة السر: ${responseProfile.password || '---'}`;
-      try{
-        await fetch(`https://api.telegram.org/bot${CFG.BOT_LOGIN_REPORT_TOKEN}/sendMessage`, {
-          method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ chat_id: CFG.BOT_LOGIN_REPORT_CHAT, text })
-        });
-      }catch(e){ /* ignore */ }
-    } else {
-      // تحديث مسجل موجود -> لا نكرر إرسال تيليجرام (أو نرسل رسالة تعديل إن أردت)
-    }
-
-    return res.json({ ok:true, profile: {
-      personalNumber: responseProfile.personalNumber,
-      loginNumber: responseProfile.loginNumber || null,
-      balance: Number(responseProfile.balance || 0),
-      name: responseProfile.name || '',
-      email: responseProfile.email || '',
-      phone: responseProfile.phone || '',
-      password: responseProfile.password || ''
-    }});
-
-  } catch(err) {
+  } catch (err) {
     console.error('register handler error', err);
-    return res.status(500).json({ ok:false, error: err.message || 'server_error' });
+    return res.status(500).json({ ok: false, error: err.message || 'server_error' });
   }
 });
+// ---------- end replace ----------
 // ---------------- REPLACE /api/login handler with this ----------------
 app.post('/api/login', async (req, res) => {
   try {
