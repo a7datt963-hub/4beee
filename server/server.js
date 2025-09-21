@@ -11,6 +11,7 @@ const fs = require('fs');
 const path = require('path');
 const multer = require('multer');
 const { google } = require('googleapis');
+const crypto = require('crypto');
 
 let sheetsClient = null;
 async function initSheets() {
@@ -528,7 +529,10 @@ app.post('/api/upload', uploadMemory.single('file'), async (req, res) => {
   }
 });
 
-// ---------- Replace /api/register ----------
+// لمنع إنشاء صفين لو دخل نفس الطلب مرتين (double submit)
+const recentRegistrations = new Map(); // key -> { profile, createdAt }
+const REGISTRATION_DEDUP_TTL = 8_000; // ms - عدّل الوقت حسب حاجتك
+// ---------- Replace /api/register (dedup + read G for loginNumber) ----------
 app.post('/api/register', async (req, res) => {
   try {
     const { name, email, password, phone } = req.body || {};
@@ -536,6 +540,25 @@ app.post('/api/register', async (req, res) => {
     const safeEmail = (email || '').toString().trim().toLowerCase();
     const safePassword = (password || '').toString();
     const safePhone = (phone || '').toString().trim();
+
+    // --- dedupe key based on submitted data (prevents double-submit creating two rows) ---
+    const dedupeRaw = `${safeName}|${safeEmail}|${safePhone}|${safePassword}`;
+    const dedupeKey = crypto.createHash('sha256').update(dedupeRaw).digest('hex');
+
+    // if recently registered same data -> return saved result
+    const recent = recentRegistrations.get(dedupeKey);
+    if (recent && (Date.now() - recent.createdAt) <= REGISTRATION_DEDUP_TTL) {
+      // return the profile we stored (might be null if processing - guard)
+      if (recent.profile) {
+        return res.json({ ok: true, profile: recent.profile });
+      } else {
+        // still processing: return generic ok-found (avoid creating duplicate)
+        return res.json({ ok: true, profile: { personalNumber: '', loginNumber: null, name: safeName, email: safeEmail, phone: safePhone } });
+      }
+    }
+
+    // mark as in-progress (prevents concurrent processing same payload)
+    recentRegistrations.set(dedupeKey, { profile: null, createdAt: Date.now() });
 
     // 1) توليد personalNumber عشوائي من 7 خانات (تأكد محلياً فقط)
     let personalNumber = null;
@@ -548,7 +571,6 @@ app.post('/api/register', async (req, res) => {
     if (!personalNumber) personalNumber = String(Date.now()).slice(-7);
 
     // 2) احصل على loginNumber من العمود G في الشيت (computeNextLoginNumberSomehow)
-    //    نستخدم قفل بسيط على pendingProfileOps لمنع سباقات (race) على نفس العملية.
     const LOCK_KEY = '__assign_login_global__';
     let lockTries = 0;
     while (pendingProfileOps.has(LOCK_KEY)) {
@@ -559,7 +581,6 @@ app.post('/api/register', async (req, res) => {
 
     let loginNumber = null;
     try {
-      // حاول الحصول من الشيت أولاً
       try {
         const next = await computeNextLoginNumberSomehow(); // تقرأ عمود G وتعيد max+1 أو null
         if (next && !isNaN(next)) {
@@ -612,11 +633,10 @@ app.post('/api/register', async (req, res) => {
           didAppend = true;
         } catch (e) {
           console.warn('register: appendSheetRow failed', e);
-          // لا نعيد الخطأ للعميل — الحساب محلي محفوظ، وسيُعاد المحاولة لاحقًا إن أردت.
         }
       }
 
-      // 6) إرسال تيليجرام لو أردت (كما في الكود الحالي) — نرسل فقط لو تم append فعلياً
+      // 6) إرسال تيليجرام لو تم append
       if (didAppend) {
         const text = `تسجيل مستخدم جديد:\nالاسم: ${newProfile.name}\nالبريد: ${newProfile.email || 'لا يوجد'}\nالهاتف: ${newProfile.phone || 'لا يوجد'}\nالرقم الشخصي: ${newProfile.personalNumber}\nكلمة السر: ${newProfile.password || '---'}`;
         try {
@@ -628,32 +648,40 @@ app.post('/api/register', async (req, res) => {
         } catch (e) { /* ignore */ }
       }
 
+      // حفظ النتيجة في الخريطة حتى يتمكن أي طلب مكرر قريب بالعودة لنفس النتيجة
+      recentRegistrations.set(dedupeKey, { profile: {
+        personalNumber: newProfile.personalNumber,
+        loginNumber: Number(newProfile.loginNumber || null),
+        balance: Number(newProfile.balance || 0),
+        name: newProfile.name || '',
+        email: newProfile.email || '',
+        phone: newProfile.phone || '',
+        password: newProfile.password || ''
+      }, createdAt: Date.now() });
+
+      // تنظيف المفتاح بعد TTL معين
+      setTimeout(() => { try { recentRegistrations.delete(dedupeKey); } catch(e){}} , REGISTRATION_DEDUP_TTL);
+
       // 7) رد للعميل
-      return res.json({
-        ok: true,
-        profile: {
-          personalNumber: newProfile.personalNumber,
-          loginNumber: Number(newProfile.loginNumber || null),
-          balance: Number(newProfile.balance || 0),
-          name: newProfile.name || '',
-          email: newProfile.email || '',
-          phone: newProfile.phone || '',
-          password: newProfile.password || ''
-        }
-      });
+      return res.json({ ok: true, profile: recentRegistrations.get(dedupeKey).profile });
 
     } finally {
-      // فك القفل مهما حصل
       pendingProfileOps.delete(LOCK_KEY);
     }
 
   } catch (err) {
     console.error('register handler error', err);
+    // تأكد من إزالة الـ dedupe entry إذا فشل التسجيل لتجنب قفل العميل
+    try {
+      const { name, email, password, phone } = req.body || {};
+      const dedupeRaw = `${(name||'').toString().trim()}|${(email||'').toString().trim().toLowerCase()}|${(phone||'').toString().trim()}|${(password||'').toString()}`;
+      const dedupeKey = crypto.createHash('sha256').update(dedupeRaw).digest('hex');
+      recentRegistrations.delete(dedupeKey);
+    } catch(e){}
     return res.status(500).json({ ok: false, error: err.message || 'server_error' });
   }
 });
 // ---------- end replace ----------
-// ---------------- REPLACE /api/login handler with this ----------------
 app.post('/api/login', async (req, res) => {
   try {
     const { personalNumber, personal, name, email, password, phone } = req.body || {};
