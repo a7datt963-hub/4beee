@@ -87,30 +87,28 @@ async function getProfileFromSheet(personal) {
 }
 
 // بحث عن صف في الشيت بحسب الايميل (افضل من البحث بالـ personal لو لم نعرف personal)
-async function findSheetProfileByEmail(email) {
-  if (!sheetsClient || !SPREADSHEET_ID || !email) return null;
-  const lower = String(email).trim().toLowerCase();
+async function findSheetProfileByEmail(email, sheet) {
   try {
-const resp = await sheetsClient.spreadsheets.values.get({
-  spreadsheetId: SPREADSHEET_ID,
-  range: 'Profiles!A2:H10000',
-});
-
-const sheetProf = {
-  rowIndex: i + 2,
-  personalNumber: r[0] || '',
-  name: r[1] || '',
-  email: r[2] || '',
-  password: r[3] || '',
-  phone: r[4] || '',
-  balance: Number(r[5] || 0),
-  loginNumber: (r[6] != null && String(r[6]).trim() !== '') ? Number(r[6]) : null,
-  vip: (r[7] != null) ? String(r[7]).trim() : ''
-};
-
+    const rows = await sheet.getRows();
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i]._rawData;
+      if (r[2] && String(r[2]).trim().toLowerCase() === email.toLowerCase()) {
+        const sheetProf = {
+          rowIndex: i + 2,
+          personalNumber: r[0] || '',
+          name: r[1] || '',
+          email: r[2] || '',
+          password: r[3] || '',
+          phone: r[4] || '',
+          balance: Number(r[5] || 0),
+          loginNumber: (r[6] != null && String(r[6]).trim() !== '') ? Number(r[6]) : null,
+          vip: (r[7] != null) ? String(r[7]).trim() : ''
+        };
+        return sheetProf;   // ✅ رجع النتيجة مباشرة
+      }
     }
-    return null;
-  } catch(e){
+    return null;            // ✅ لو ما لقى الإيميل
+  } catch (e) {
     console.warn('findSheetProfileByEmail error', e);
     return null;
   }
