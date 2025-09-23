@@ -107,7 +107,7 @@ const sheetProf = {
   loginNumber: (r[6] != null && String(r[6]).trim() !== '') ? Number(r[6]) : null,
   vip: (r[7] != null) ? String(r[7]).trim() : ''
 };
-      }
+
     }
     return null;
   } catch(e){
