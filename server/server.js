@@ -95,7 +95,7 @@ const resp = await sheetsClient.spreadsheets.values.get({
   spreadsheetId: SPREADSHEET_ID,
   range: 'Profiles!A2:H10000',
 });
-...
+
 const sheetProf = {
   rowIndex: i + 2,
   personalNumber: r[0] || '',
