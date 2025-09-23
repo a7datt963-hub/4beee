@@ -54,12 +54,13 @@ const SPREADSHEET_ID = process.env.SHEET_ID || null;
 /**
  * اقرأ صف البروفايل من شيت Profiles (A..G) وترجعه كـ object أو null
  */
+// اقرأ صف البروفايل من شيت Profiles (A..H) وترجعه كـ object أو null
 async function getProfileFromSheet(personal) {
   if (!sheetsClient || !SPREADSHEET_ID) return null;
   try {
     const resp = await sheetsClient.spreadsheets.values.get({
       spreadsheetId: SPREADSHEET_ID,
-      range: 'Profiles!A2:G10000',
+      range: 'Profiles!A2:H10000', // <-- تم توسيع النطاق حتى العمود H
     });
     const rows = (resp.data && resp.data.values) || [];
     for (let i = 0; i < rows.length; i++) {
@@ -73,7 +74,8 @@ async function getProfileFromSheet(personal) {
           password: r[3] || '',
           phone: r[4] || '',
           balance: Number(r[5] || 0),
-          loginNumber: (r[6] != null && String(r[6]).trim() !== '') ? Number(r[6]) : null
+          loginNumber: (r[6] != null && String(r[6]).trim() !== '') ? Number(r[6]) : null,
+          vip: (r[7] != null) ? String(r[7]).trim() : '' // <-- العمود H
         };
       }
     }
@@ -89,25 +91,22 @@ async function findSheetProfileByEmail(email) {
   if (!sheetsClient || !SPREADSHEET_ID || !email) return null;
   const lower = String(email).trim().toLowerCase();
   try {
-    const resp = await sheetsClient.spreadsheets.values.get({
-      spreadsheetId: SPREADSHEET_ID,
-      range: 'Profiles!A2:G10000',
-    });
-    const rows = (resp.data && resp.data.values) || [];
-    for (let i=0;i<rows.length;i++){
-      const r = rows[i];
-      const rEmail = (r[2] || '').toString().trim().toLowerCase();
-      if (rEmail && rEmail === lower) {
-        return {
-          rowIndex: i + 2,
-          personalNumber: r[0] || '',
-          name: r[1] || '',
-          email: r[2] || '',
-          password: r[3] || '',
-          phone: r[4] || '',
-          balance: Number(r[5] || 0),
-          loginNumber: (r[6] != null && String(r[6]).trim() !== '') ? Number(r[6]) : null
-        };
+const resp = await sheetsClient.spreadsheets.values.get({
+  spreadsheetId: SPREADSHEET_ID,
+  range: 'Profiles!A2:H10000',
+});
+...
+const sheetProf = {
+  rowIndex: i + 2,
+  personalNumber: r[0] || '',
+  name: r[1] || '',
+  email: r[2] || '',
+  password: r[3] || '',
+  phone: r[4] || '',
+  balance: Number(r[5] || 0),
+  loginNumber: (r[6] != null && String(r[6]).trim() !== '') ? Number(r[6]) : null,
+  vip: (r[7] != null) ? String(r[7]).trim() : ''
+};
       }
     }
     return null;
@@ -117,6 +116,7 @@ async function findSheetProfileByEmail(email) {
   }
 }
 
+// Optional: بحث مطابق تماماً على name+email+password+phone
 // Optional: بحث مطابق تماماً على name+email+password+phone
 async function findSheetProfileByFullData(name, email, password, phone) {
   if (!sheetsClient || !SPREADSHEET_ID) return null;
@@ -129,7 +129,7 @@ async function findSheetProfileByFullData(name, email, password, phone) {
   try {
     const resp = await sheetsClient.spreadsheets.values.get({
       spreadsheetId: SPREADSHEET_ID,
-      range: 'Profiles!A2:G10000',
+      range: 'Profiles!A2:H10000',
     });
     const rows = (resp.data && resp.data.values) || [];
     for (let i=0;i<rows.length;i++){
@@ -147,7 +147,8 @@ async function findSheetProfileByFullData(name, email, password, phone) {
           password: r[3] || '',
           phone: r[4] || '',
           balance: Number(r[5] || 0),
-          loginNumber: (r[6] != null && String(r[6]).trim() !== '') ? Number(r[6]) : null
+          loginNumber: (r[6] != null && String(r[6]).trim() !== '') ? Number(r[6]) : null,
+          vip: (r[7] != null) ? String(r[7]).trim() : ''
         };
       }
     }
@@ -163,7 +164,7 @@ async function findSheetProfileByFullData(name, email, password, phone) {
  */
 async function updateSheetRowByRowIndex(rowIndex, profile){
   if (!sheetsClient || !SPREADSHEET_ID) throw new Error('sheets_not_ready');
-  const range = `Profiles!A${rowIndex}:G${rowIndex}`;
+  const range = `Profiles!A${rowIndex}:H${rowIndex}`; // <-- A..H
   const values = [[
     String(profile.personalNumber || ''),
     String(profile.name || ''),
@@ -171,7 +172,8 @@ async function updateSheetRowByRowIndex(rowIndex, profile){
     String(profile.password || ''),
     String(profile.phone || ''),
     String(typeof profile.balance !== 'undefined' ? profile.balance : ''),
-    String(typeof profile.loginNumber !== 'undefined' && profile.loginNumber !== null ? profile.loginNumber : '')
+    String(typeof profile.loginNumber !== 'undefined' && profile.loginNumber !== null ? profile.loginNumber : ''),
+    String(profile.vip || '')
   ]];
   await sheetsClient.spreadsheets.values.update({
     spreadsheetId: SPREADSHEET_ID,
@@ -194,11 +196,12 @@ async function appendSheetRow(profile){
     String(profile.password || ''),
     String(profile.phone || ''),
     String(typeof profile.balance !== 'undefined' ? profile.balance : ''),
-    String(typeof profile.loginNumber !== 'undefined' && profile.loginNumber !== null ? profile.loginNumber : '')
+    String(typeof profile.loginNumber !== 'undefined' && profile.loginNumber !== null ? profile.loginNumber : ''),
+    String(profile.vip || '')
   ]];
   await sheetsClient.spreadsheets.values.append({
     spreadsheetId: SPREADSHEET_ID,
-    range: 'Profiles!A:G',
+    range: 'Profiles!A:H',
     valueInputOption: 'RAW',
     insertDataOption: 'INSERT_ROWS',
     requestBody: { values }
@@ -628,7 +631,8 @@ app.post('/api/register', async (req, res) => {
             password: newProfile.password,
             phone: newProfile.phone,
             balance: String(newProfile.balance || 0),
-            loginNumber: String(newProfile.loginNumber || '')
+            loginNumber: String(newProfile.loginNumber || ''),
+            vip: ''
           });
           didAppend = true;
         } catch (e) {
@@ -692,15 +696,16 @@ app.post('/api/login', async (req, res) => {
     const qPhone = (phone || '').toString().trim();
 
     // helper to build profile response object
-    const buildOut = (p) => ({
-      personalNumber: String(p.personalNumber || p.personal || ''),
-      loginNumber: p.loginNumber || null,
-      balance: Number(typeof p.balance !== 'undefined' ? p.balance : 0),
-      name: p.name || '',
-      email: p.email || '',
-      phone: p.phone || '',
-      password: p.password || ''
-    });
+const buildOut = (p) => ({
+  personalNumber: String(p.personalNumber || p.personal || ''),
+  loginNumber: p.loginNumber || null,
+  balance: Number(typeof p.balance !== 'undefined' ? p.balance : 0),
+  name: p.name || '',
+  email: p.email || '',
+  phone: p.phone || '',
+  password: p.password || '',
+  vip: p.vip || ''
+});
 
     // 1) If client provided personalNumber: return authoritative row if exists (sheet -> local)
     if (personalKey) {
@@ -774,7 +779,7 @@ app.post('/api/login', async (req, res) => {
     try {
       resp = await sheetsClient.spreadsheets.values.get({
         spreadsheetId: SPREADSHEET_ID,
-        range: 'Profiles!A2:G10000',
+        range: 'Profiles!A2:H10000',
       });
     } catch (e) {
       console.warn('login: failed to read sheet rows', e);
@@ -794,6 +799,7 @@ app.post('/api/login', async (req, res) => {
       const rPhone = (r[4] || '').toString().trim();
       const rBalance = Number(r[5] || 0);
       const rLoginNumber = (r[6] != null && String(r[6]).trim() !== '') ? Number(r[6]) : null;
+      const rvip = (r[7] || '')
 
       // for each non-empty query field require equality
       if (qEmail && rEmail.toLowerCase() !== qEmail.toLowerCase()) continue;
@@ -802,16 +808,17 @@ app.post('/api/login', async (req, res) => {
       if (qPhone && rPhone.toLowerCase() !== qPhone.toLowerCase()) continue;
 
       // matched
-      matched = {
-        rowIndex: i + 2,
-        personalNumber: rPersonal,
-        name: rName,
-        email: rEmail,
-        password: rPassword,
-        phone: rPhone,
-        balance: rBalance,
-        loginNumber: rLoginNumber
-      };
+matched = {
+  rowIndex: i + 2,
+  personalNumber: rPersonal,
+  name: rName,
+  email: rEmail,
+  password: rPassword,
+  phone: rPhone,
+  balance: rBalance,
+  loginNumber: rLoginNumber,
+  vip: rvip
+};
       break;
     }
 
@@ -836,6 +843,7 @@ app.post('/api/login', async (req, res) => {
         local.phone = matched.phone || local.phone;
         local.balance = typeof matched.balance !== 'undefined' ? Number(matched.balance) : local.balance;
         if (matched.loginNumber) local.loginNumber = matched.loginNumber;
+        local.vip = matched.vip || local.vip || '';
       }
       saveData(DB);
       return res.json({ ok:true, found:true, profile: buildOut(local) });
@@ -1280,7 +1288,7 @@ app.get('/api/profile/check', async (req, res) => {
     if (email) {
       const resp = await (sheetsClient && SPREADSHEET_ID ? sheetsClient.spreadsheets.values.get({
         spreadsheetId: SPREADSHEET_ID,
-        range: 'Profiles!A2:G10000',
+        range: 'Profiles!A2:H10000',
       }) : Promise.resolve({ data:{ values: [] } }));
       const rows = (resp.data && resp.data.values) || [];
       for (let i=0;i<rows.length;i++){
@@ -1295,7 +1303,8 @@ app.get('/api/profile/check', async (req, res) => {
             password: r[3] || '',
             phone: r[4] || '',
             balance: Number(r[5] || 0),
-            loginNumber: (r[6] != null && String(r[6]).trim() !== '') ? Number(r[6]) : null
+            loginNumber: (r[6] != null && String(r[6]).trim() !== '') ? Number(r[6]) : null,
+            vip: (r[7] != null) ? String(r[7]).trim() : ''
           };
           return res.json({ ok:true, found:true, sheetProfile });
         }
@@ -1336,6 +1345,7 @@ app.get('/api/profile', async (req, res) => {
         local.phone = sheetProf.phone || local.phone;
         local.balance = Number(sheetProf.balance || 0);
         if (sheetProf.loginNumber) local.loginNumber = Number(sheetProf.loginNumber);
+        if (sheetProf.vip) local.vip = sheetProf.vip;
         saveData(DB);
       } else {
         // not in sheet: do not auto-insert here (client may ask to create)
@@ -1352,7 +1362,8 @@ app.get('/api/profile', async (req, res) => {
       password: local.password || '',
       phone: local.phone || '',
       balance: Number(local.balance || 0),
-      loginNumber: local.loginNumber || null
+      loginNumber: local.loginNumber || null,
+      vip: local.vip || ''
     }});
   } catch (e) {
     console.error('GET /api/profile error', e);
