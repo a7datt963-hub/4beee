@@ -1374,9 +1374,11 @@ app.get('/api/profile', async (req, res) => {
 /**
  * Append order/charge text into column I (Orders) of the user's row
  * - personal: رقم الشخص (personalNumber)
- * - orderText: نص الطلب (مثلاً "فري فاير 100 جوهرة\nالايدي:12345\nالحالة:قيد المراجعة\nالوقت:...")
+ * - orderText: نص الطلب (مثلاً "فري فاير 100 جوهرة\nالايدي:12345\nالحالة:قيد المراجعة")
+ * - orderId: رقم الطلب (Date.now() أو أي رقم تولده)
+ * - isCharge: إذا كان الطلب شحن رصيد → true
  */
-async function appendOrderToSheet(personal, orderText) {
+async function appendOrderToSheet(personal, orderText, orderId = null, isCharge = false) {
   if (!sheetsClient || !SPREADSHEET_ID) {
     console.warn('Sheets not ready, cannot append order');
     return false;
@@ -1388,22 +1390,34 @@ async function appendOrderToSheet(personal, orderText) {
       return false;
     }
     const range = `Profiles!I${row.rowIndex}`;
+
     // اقرأ القيمة الحالية في العمود I
     const resp = await sheetsClient.spreadsheets.values.get({
       spreadsheetId: SPREADSHEET_ID,
       range
     });
     const currentVal = (resp.data && resp.data.values && resp.data.values[0] && resp.data.values[0][0]) || '';
+
+    // أضف الوقت ورقم الطلب إذا كان Order
+    const now = new Date().toISOString();
+    let finalText = orderText;
+    if (isCharge) {
+      finalText += `\nالوقت: ${now}`;
+    } else {
+      finalText += `\nرقم الطلب: ${orderId || Date.now()}\nالوقت: ${now}`;
+    }
+
     const newVal = currentVal
-      ? currentVal + '||' + orderText
-      : orderText;
+      ? currentVal + '||' + finalText
+      : finalText;
+
     await sheetsClient.spreadsheets.values.update({
       spreadsheetId: SPREADSHEET_ID,
       range,
       valueInputOption: 'RAW',
       requestBody: { values: [[ newVal ]] }
     });
-    console.log('Order appended to sheet for personal', personal);
+    console.log('Order/Charge appended to sheet for personal', personal);
     return true;
   } catch (e) {
     console.error('appendOrderToSheet error', e);
