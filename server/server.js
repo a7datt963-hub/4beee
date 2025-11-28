@@ -1426,6 +1426,31 @@ async function appendOrderToSheet(personal, orderText) {
     return false;
   }
       }
+// ---------- API: قراءة الطلبات من العمود I ----------
+app.get('/api/orders', async (req, res) => {
+  if (!sheetsClient || !SPREADSHEET_ID) {
+    return res.json({ ok:false, error:'sheets_not_ready' });
+  }
+  try {
+    const resp = await sheetsClient.spreadsheets.values.get({
+      spreadsheetId: SPREADSHEET_ID,
+      range: 'Profiles!I2:I10000', // العمود I فقط
+    });
+    const rows = (resp.data && resp.data.values) || [];
+    const orders = [];
+    for (let i=0;i<rows.length;i++){
+      const raw = rows[i][0] || '';
+      if(raw.trim() !== ''){
+        orders.push({ rowIndex: i+2, text: raw });
+      }
+    }
+    return res.json({ ok:true, orders });
+  } catch(e){
+    console.error('orders read error', e);
+    return res.json({ ok:false, error:String(e) });
+  }
+});
+
 app.listen(PORT, ()=> {
   console.log(`Server listening on ${PORT}`);
   DB = loadData();
