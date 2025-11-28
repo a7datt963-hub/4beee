@@ -1375,10 +1375,8 @@ app.get('/api/profile', async (req, res) => {
  * Append order/charge text into column I (Orders) of the user's row
  * - personal: رقم الشخص (personalNumber)
  * - orderText: نص الطلب (مثلاً "فري فاير 100 جوهرة\nالايدي:12345\nالحالة:قيد المراجعة")
- * - orderId: رقم الطلب (Date.now() أو أي رقم تولده)
- * - isCharge: إذا كان الطلب شحن رصيد → true
  */
-async function appendOrderToSheet(personal, orderText, orderId = null, isCharge = false) {
+async function appendOrderToSheet(personal, orderText) {
   if (!sheetsClient || !SPREADSHEET_ID) {
     console.warn('Sheets not ready, cannot append order');
     return false;
@@ -1398,14 +1396,13 @@ async function appendOrderToSheet(personal, orderText, orderId = null, isCharge 
     });
     const currentVal = (resp.data && resp.data.values && resp.data.values[0] && resp.data.values[0][0]) || '';
 
-    // أضف الوقت ورقم الطلب إذا كان Order
-    const now = new Date().toISOString();
-    let finalText = orderText;
-    if (isCharge) {
-      finalText += `\nالوقت: ${now}`;
-    } else {
-      finalText += `\nرقم الطلب: ${orderId || Date.now()}\nالوقت: ${now}`;
-    }
+    // توليد معرف الطلب والوقت
+    const orderId = Date.now(); // رقم فريد بالميلي ثانية
+    const now = new Date();
+    const formattedTime = `${now.getFullYear()}/${String(now.getMonth()+1).padStart(2,'0')}/${String(now.getDate()).padStart(2,'0')} ${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}:${String(now.getSeconds()).padStart(2,'0')}`;
+
+    // أضف المعرف والوقت للنص
+    const finalText = `${orderText}\nمعرف الطلب: ${orderId}\nالوقت: ${formattedTime}`;
 
     const newVal = currentVal
       ? currentVal + '||' + finalText
@@ -1417,7 +1414,7 @@ async function appendOrderToSheet(personal, orderText, orderId = null, isCharge 
       valueInputOption: 'RAW',
       requestBody: { values: [[ newVal ]] }
     });
-    console.log('Order/Charge appended to sheet for personal', personal);
+    console.log('Order appended to sheet for personal', personal, 'with id', orderId);
     return true;
   } catch (e) {
     console.error('appendOrderToSheet error', e);
