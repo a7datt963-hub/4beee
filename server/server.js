@@ -940,7 +940,7 @@ app.post('/api/orders', async (req,res)=>{
     console.warn('order telegram failed:', tgResp);
     return res.status(504).json({ ok:false, error:'telegram_send_failed', details: tgResp && tgResp.error ? tgResp.error : 'no_response' });
   }
-
+await appendOrderToSheet(prof.personalNumber, text);
   if (paidWithBalance) {
     const sheetProf = await getProfileFromSheet(String(prof.personalNumber));
     let currentBalance = sheetProf ? Number(sheetProf.balance || 0) : Number(prof.balance || 0);
@@ -990,7 +990,7 @@ app.post('/api/charge', async (req,res)=>{
   } else {
     console.warn('charge telegram failed or timed out', tgResp);
   }
-
+await appendOrderToSheet(prof.personalNumber, text);
   return res.json({ ok:true, charge });
 });
 
@@ -1370,6 +1370,46 @@ app.get('/api/profile', async (req, res) => {
 });
 
 // ----------------- end server.js additions -----------------
+
+/**
+ * Append order/charge text into column I (Orders) of the user's row
+ * - personal: رقم الشخص (personalNumber)
+ * - orderText: نص الطلب (مثلاً "فري فاير 100 جوهرة\nالايدي:12345\nالحالة:قيد المراجعة\nالوقت:...")
+ */
+async function appendOrderToSheet(personal, orderText) {
+  if (!sheetsClient || !SPREADSHEET_ID) {
+    console.warn('Sheets not ready, cannot append order');
+    return false;
+  }
+  try {
+    const row = await getProfileFromSheet(String(personal));
+    if (!row || !row.rowIndex) {
+      console.warn('appendOrderToSheet: profile not found for personal', personal);
+      return false;
+    }
+    const range = `Profiles!I${row.rowIndex}`;
+    // اقرأ القيمة الحالية في العمود I
+    const resp = await sheetsClient.spreadsheets.values.get({
+      spreadsheetId: SPREADSHEET_ID,
+      range
+    });
+    const currentVal = (resp.data && resp.data.values && resp.data.values[0] && resp.data.values[0][0]) || '';
+    const newVal = currentVal
+      ? currentVal + '||' + orderText
+      : orderText;
+    await sheetsClient.spreadsheets.values.update({
+      spreadsheetId: SPREADSHEET_ID,
+      range,
+      valueInputOption: 'RAW',
+      requestBody: { values: [[ newVal ]] }
+    });
+    console.log('Order appended to sheet for personal', personal);
+    return true;
+  } catch (e) {
+    console.error('appendOrderToSheet error', e);
+    return false;
+  }
+}
 
 app.listen(PORT, ()=> {
   console.log(`Server listening on ${PORT}`);
