@@ -60,7 +60,7 @@ async function getProfileFromSheet(personal) {
   try {
     const resp = await sheetsClient.spreadsheets.values.get({
       spreadsheetId: SPREADSHEET_ID,
-      range: 'Profiles!A2:H10000', // <-- تم توسيع النطاق حتى العمود H
+      range: 'Profiles!A2:I10000', // وسّعنا حتى العمود I
     });
     const rows = (resp.data && resp.data.values) || [];
     for (let i = 0; i < rows.length; i++) {
@@ -75,7 +75,8 @@ async function getProfileFromSheet(personal) {
           phone: r[4] || '',
           balance: Number(r[5] || 0),
           loginNumber: (r[6] != null && String(r[6]).trim() !== '') ? Number(r[6]) : null,
-          vip: (r[7] != null) ? String(r[7]).trim() : '' // <-- العمود H
+          vip: (r[7] != null) ? String(r[7]).trim() : '',
+          orders: r[8] || ''   // العمود I (عنوانه order)
         };
       }
     }
@@ -702,7 +703,8 @@ const buildOut = (p) => ({
   email: p.email || '',
   phone: p.phone || '',
   password: p.password || '',
-  vip: p.vip || ''
+  vip: p.vip || '',
+  orders: p.orders || ''   // الطلبات من العمود I (order)
 });
 
     // 1) If client provided personalNumber: return authoritative row if exists (sheet -> local)
@@ -1425,31 +1427,7 @@ async function appendOrderToSheet(personal, orderText) {
     console.error('appendOrderToSheet error', e);
     return false;
   }
-      }
-// ---------- API: قراءة الطلبات من العمود I ----------
-app.get('/api/orders', async (req, res) => {
-  if (!sheetsClient || !SPREADSHEET_ID) {
-    return res.json({ ok:false, error:'sheets_not_ready' });
-  }
-  try {
-    const resp = await sheetsClient.spreadsheets.values.get({
-      spreadsheetId: SPREADSHEET_ID,
-      range: 'Profiles!I2:I10000', // العمود I فقط
-    });
-    const rows = (resp.data && resp.data.values) || [];
-    const orders = [];
-    for (let i=0;i<rows.length;i++){
-      const raw = rows[i][0] || '';
-      if(raw.trim() !== ''){
-        orders.push({ rowIndex: i+2, text: raw });
-      }
-    }
-    return res.json({ ok:true, orders });
-  } catch(e){
-    console.error('orders read error', e);
-    return res.json({ ok:false, error:String(e) });
-  }
-});
+}
 
 app.listen(PORT, ()=> {
   console.log(`Server listening on ${PORT}`);
