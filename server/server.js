@@ -1396,13 +1396,18 @@ async function appendOrderToSheet(personal, orderText) {
     });
     const currentVal = (resp.data && resp.data.values && resp.data.values[0] && resp.data.values[0][0]) || '';
 
-    // توليد معرف الطلب والوقت
-    const orderId = Date.now(); // رقم فريد بالميلي ثانية
+    // توليد الوقت بصيغة yyyy/mm/dd hh:mm:ss
     const now = new Date();
     const formattedTime = `${now.getFullYear()}/${String(now.getMonth()+1).padStart(2,'0')}/${String(now.getDate()).padStart(2,'0')} ${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}:${String(now.getSeconds()).padStart(2,'0')}`;
 
-    // أضف المعرف والوقت للنص
-    const finalText = `${orderText}\nمعرف الطلب: ${orderId}\nالوقت: ${formattedTime}`;
+    // تحقق إذا النص يحتوي بالفعل على "معرف الطلب:"
+    let finalText = orderText;
+    if (!/معرف الطلب:/.test(orderText)) {
+      const orderId = Date.now(); // رقم فريد
+      finalText += `\nمعرف الطلب: ${orderId}`;
+    }
+    // أضف الوقت دائمًا
+    finalText += `\nالوقت: ${formattedTime}`;
 
     const newVal = currentVal
       ? currentVal + '||' + finalText
@@ -1414,14 +1419,13 @@ async function appendOrderToSheet(personal, orderText) {
       valueInputOption: 'RAW',
       requestBody: { values: [[ newVal ]] }
     });
-    console.log('Order appended to sheet for personal', personal, 'with id', orderId);
+    console.log('Order appended to sheet for personal', personal);
     return true;
   } catch (e) {
     console.error('appendOrderToSheet error', e);
     return false;
   }
-}
-
+      }
 app.listen(PORT, ()=> {
   console.log(`Server listening on ${PORT}`);
   DB = loadData();
