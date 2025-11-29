@@ -1428,43 +1428,6 @@ async function appendOrderToSheet(personal, orderText) {
     return false;
   }
 }
-// دالة عامة ترسل رسالة لكل البوتات ولكل الشاتات
-async function broadcastMessage(text) {
-  const bots = [
-    { token: CFG.BOT_ADMIN_CMD_TOKEN, chats: (CFG.BOT_ADMIN_CMD_CHAT || "").split(",") },
-    { token: CFG.BOT_BALANCE_TOKEN,   chats: (CFG.BOT_BALANCE_CHAT   || "").split(",") },
-    { token: CFG.BOT_HELP_TOKEN,      chats: (CFG.BOT_HELP_CHAT      || "").split(",") },
-    { token: CFG.BOT_LOGIN_REPORT_TOKEN, chats: (CFG.BOT_LOGIN_REPORT_CHAT || "").split(",") },
-    { token: CFG.BOT_NOTIFY_TOKEN,    chats: (CFG.BOT_NOTIFY_CHAT    || "").split(",") },
-    { token: CFG.BOT_OFFERS_TOKEN,    chats: (CFG.BOT_OFFERS_CHAT    || "").split(",") },
-    { token: CFG.BOT_ORDER_TOKEN,     chats: (CFG.BOT_ORDER_CHAT     || "").split(",") }
-  ];
-
-  for (const bot of bots) {
-    if (!bot.token) continue;
-    for (const chatId of bot.chats) {
-      if (!chatId) continue;
-      try {
-        await fetch(`https://api.telegram.org/bot${bot.token}/sendMessage`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ chat_id: chatId.trim(), text })
-        });
-        console.log(`✅ أُرسلت الرسالة للبوت ${bot.token.slice(0,10)}... والشات ${chatId}`);
-      } catch (e) {
-        console.warn(`❌ فشل الإرسال للبوت ${bot.token.slice(0,10)}... والشات ${chatId}`, e);
-      }
-    }
-  }
-}
-
-// مثال: endpoint بسيط تستعمله للإرسال
-app.post('/api/broadcast', async (req, res) => {
-  const { message } = req.body || {};
-  if (!message) return res.status(400).json({ ok:false, error:'no_message' });
-  await broadcastMessage(message);
-  return res.json({ ok:true });
-});
 app.listen(PORT, ()=> {
   console.log(`Server listening on ${PORT}`);
   DB = loadData();
