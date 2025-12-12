@@ -1428,6 +1428,187 @@ async function appendOrderToSheet(personal, orderText) {
     return false;
   }
 }
+// ====== Referral endpoints (الصق هذا في آخر server.js) ======
+const alphaNum = () => Math.random().toString(36).substr(2,6).toUpperCase();
+
+/**
+ * generate a referral code for a personal (id)
+ * - if already exists, return it
+ * - else generate unique code, store in DB and (if possible) in Sheets column J
+ */
+app.post('/api/referral/generate', async (req, res) => {
+  try {
+    const { personal } = req.body || {};
+    if(!personal) return res.json({ ok:false, error:'missing_personal' });
+
+    // ensure local profile exists
+    const p = ensureProfile(personal);
+
+    // if exists in DB return
+    if(p.referralcode && String(p.referralcode).trim() !== '') {
+      return res.json({ ok:true, code: String(p.referralcode) });
+    }
+
+    // generate candidate + uniqueness check (DB + Sheets)
+    let code = (p.name ? p.name.toString().slice(0,3).toUpperCase().replace(/[^A-Z0-9]/g,'') : '') + alphaNum();
+    code = code.substring(0, 10);
+
+    // ensure unique in DB
+    let tries = 0;
+    while(DB.profiles.find(x => x.referralcode === code) && tries < 10) {
+      code = (p.name ? p.name.toString().slice(0,3).toUpperCase().replace(/[^A-Z0-9]/g,'') : '') + alphaNum();
+      code = code.substring(0,10);
+      tries++;
+    }
+
+    // ensure unique in Sheets if available
+    if(sheetsClient && SPREADSHEET_ID) {
+      try {
+        const resp = await sheetsClient.spreadsheets.values.get({
+          spreadsheetId: SPREADSHEET_ID,
+          range: 'Profiles!J2:J10000'
+        });
+        const rows = (resp.data && resp.data.values) || [];
+        const exists = new Set(rows.map(r => (r && r[0]) ? String(r[0]).trim() : ''));
+        tries = 0;
+        while(exists.has(code) && tries < 10){
+          code = (p.name ? p.name.toString().slice(0,3).toUpperCase().replace(/[^A-Z0-9]/g,'') : '') + alphaNum();
+          code = code.substring(0,10); tries++;
+        }
+      } catch(e){
+        // ignore sheet scan errors, fallback to DB uniqueness
+      }
+    }
+
+    // store in local DB
+    p.referralcode = code;
+    saveData(DB);
+
+    // store in sheet: if row exists update J, else append a row with J set
+    try {
+      const sheetRow = await getProfileFromSheet(String(personal));
+      if(sheetRow && sheetRow.rowIndex){
+        await sheetsClient.spreadsheets.values.update({
+          spreadsheetId: SPREADSHEET_ID,
+          range: `Profiles!J${sheetRow.rowIndex}`,
+          valueInputOption: 'RAW',
+          requestBody: { values: [[ String(code) ]] }
+        });
+      } else {
+        // append with empty placeholders up to column J (A..K) -> make sure we don't break structure
+        const vals = [[ String(personal), String(p.name||''), String(p.email||''), String(p.password||''), String(p.phone||''), String(typeof p.balance !== 'undefined' ? p.balance : ''), String(p.loginNumber||''), String(p.vip||''), String(p.orders||''), String(code), '' ]];
+        await sheetsClient.spreadsheets.values.append({
+          spreadsheetId: SPREADSHEET_ID,
+          range: 'Profiles!A:K',
+          valueInputOption: 'RAW',
+          insertDataOption: 'INSERT_ROWS',
+          requestBody: { values: vals }
+        });
+      }
+    } catch(e){
+      // sheet write failed -> keep local DB only
+      console.warn('referral generate: sheet write failed', e);
+    }
+
+    return res.json({ ok:true, code });
+  } catch(e){
+    console.error('referral.generate error', e);
+    return res.json({ ok:false, error: String(e) });
+  }
+});
+
+/**
+ * redeem referral code:
+ * body: { personal, code }
+ * behavior:
+ *  - can redeem only once (if referredby already exists reject)
+ *  - cannot use own code
+ *  - credit: user (redeemer) gets +250, owner gets +500 (update DB + Sheets)
+ */
+app.post('/api/referral/redeem', async (req, res) => {
+  try {
+    const { personal, code } = req.body || {};
+    if(!personal || !code) return res.json({ ok:false, error:'missing_parameters' });
+
+    const me = ensureProfile(personal);
+    if(me.referredby && String(me.referredby).trim() !== '') {
+      return res.json({ ok:false, error:'already_referred' });
+    }
+
+    // find referrer in DB first
+    let ref = DB.profiles.find(p => p.referralcode === code);
+    let refPersonal = ref ? ref.personalNumber : null;
+
+    // if not in DB, search in Sheets
+    if(!refPersonal && sheetsClient && SPREADSHEET_ID) {
+      try {
+        const resp = await sheetsClient.spreadsheets.values.get({
+          spreadsheetId: SPREADSHEET_ID,
+          range: 'Profiles!A2:K10000'
+        });
+        const rows = (resp.data && resp.data.values) || [];
+        for(let i=0;i<rows.length;i++){
+          const r = rows[i];
+          const rowCode = (r[9] || '').toString().trim(); // J is index 9 (0-based)
+          if(rowCode && rowCode.toUpperCase() === code.toString().toUpperCase()){
+            refPersonal = r[0] || '';
+            break;
+          }
+        }
+      } catch(e){
+        console.warn('referral.redeem: sheet scan failed', e);
+      }
+    }
+
+    if(!refPersonal) return res.json({ ok:false, error:'code_not_found' });
+    if(String(refPersonal) === String(personal)) return res.json({ ok:false, error:'cannot_use_own_code' });
+
+    // ensure referrer local profile (create if missing)
+    const refProfile = ensureProfile(refPersonal);
+
+    // apply balances
+    const addToRedeemer = 250;
+    const addToOwner = 500;
+
+    me.referredby = code;
+    me.balance = Number(me.balance || 0) + Number(addToRedeemer);
+    refProfile.balance = Number(refProfile.balance || 0) + Number(addToOwner);
+
+    saveData(DB);
+
+    // update Sheets balances and referredby column K for redeemer
+    try {
+      // update redeemer balance (col F)
+      await updateBalanceInSheet(String(me.personalNumber), me.balance);
+      // update owner's balance
+      await updateBalanceInSheet(String(refProfile.personalNumber), refProfile.balance);
+      // write referredby into column K of redeemer row if exists
+      const redeemerRow = await getProfileFromSheet(String(me.personalNumber));
+      if(redeemerRow && redeemerRow.rowIndex && sheetsClient){
+        await sheetsClient.spreadsheets.values.update({
+          spreadsheetId: SPREADSHEET_ID,
+          range: `Profiles!K${redeemerRow.rowIndex}`,
+          valueInputOption: 'RAW',
+          requestBody: { values: [[ String(code) ]] }
+        });
+      } else if(sheetsClient){
+        // if no row existed, append a minimal row with K set
+        const vals = [[ String(me.personalNumber), String(me.name||''), String(me.email||''), String(me.password||''), String(me.phone||''), String(me.balance||''), String(me.loginNumber||''), String(me.vip||''), String(me.orders||''), String(me.referralcode||''), String(code) ]];
+        await sheetsClient.spreadsheets.values.append({
+          spreadsheetId: SPREADSHEET_ID, range: 'Profiles!A:K', valueInputOption: 'RAW', insertDataOption:'INSERT_ROWS', requestBody:{ values: vals }
+        });
+      }
+    } catch(e){
+      console.warn('referral.redeem: sheet update errors', e);
+    }
+
+    return res.json({ ok:true, newBalance: me.balance, ownerNewBalance: refProfile.balance, referredby: me.referredby });
+  } catch(e){
+    console.error('referral.redeem error', e);
+    return res.json({ ok:false, error: String(e) });
+  }
+});
+
 app.listen(PORT, ()=> {
   console.log(`Server listening on ${PORT}`);
   DB = loadData();
