@@ -1567,8 +1567,8 @@ app.post('/api/referral/redeem', async (req, res) => {
     const refProfile = ensureProfile(refPersonal);
 
     // apply balances
-    const addToRedeemer = 250;
-    const addToOwner = 500;
+    const addToRedeemer = 0.025;
+    const addToOwner = 0.040;
 
     me.referredby = code;
     me.balance = Number(me.balance || 0) + Number(addToRedeemer);
