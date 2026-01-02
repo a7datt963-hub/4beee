@@ -1428,12 +1428,13 @@ async function appendOrderToSheet(personal, orderText) {
     return false;
   }
 }
-
-// ====== Referral endpoints ======
+// ====== Referral endpoints (الصق هذا في آخر server.js) ======
 const alphaNum = () => Math.random().toString(36).substr(2,6).toUpperCase();
 
 /**
  * generate a referral code for a personal (id)
+ * - if already exists, return it
+ * - else generate unique code, store in DB and (if possible) in Sheets column J
  */
 app.post('/api/referral/generate', async (req, res) => {
   try {
@@ -1443,74 +1444,58 @@ app.post('/api/referral/generate', async (req, res) => {
     // ensure local profile exists
     const p = ensureProfile(personal);
 
-    // 1. Check Local DB first
+    // if exists in DB return
     if(p.referralcode && String(p.referralcode).trim() !== '') {
-      return res.json({ ok:false, error: 'تم توليد رمز بالفعل' }); 
-      // أو يمكنك إرجاع الكود القديم: return res.json({ ok:true, code: String(p.referralcode) });
+      return res.json({ ok:true, code: String(p.referralcode) });
     }
 
-    // 2. Check Google Sheets Column J (Index 9) BEFORE generating/writing
-    let userSheetRowIndex = null; // لتخزين رقم الصف لاستخدامه لاحقاً
-    if(sheetsClient && SPREADSHEET_ID) {
-      try {
-        const resp = await sheetsClient.spreadsheets.values.get({
-          spreadsheetId: SPREADSHEET_ID,
-          range: 'Profiles!A2:J10000' // جلب البيانات حتى العمود J
-        });
-        const rows = (resp.data && resp.data.values) || [];
-        
-        for(let i=0; i<rows.length; i++){
-          // البحث عن الشخص عبر العمود الأول (A)
-          if(String(rows[i][0]) === String(personal)) {
-             userSheetRowIndex = i + 2; // +2 لأن المصفوفة تبدأ من 0 والمدى بدأ من A2
-             const existingCodeInSheet = rows[i][9]; // العمود J هو الاندكس 9
-             
-             // الشرط المطلوب: إذا وجدنا نص، لا نكتب ونرجع رسالة
-             if(existingCodeInSheet && String(existingCodeInSheet).trim() !== '') {
-               return res.json({ ok: false, error: 'تم توليد رمز بالفعل' });
-             }
-             break;
-          }
-        }
-      } catch(e) {
-        console.warn('referral.generate: sheet check failed', e);
-      }
-    }
-
-    // 3. Generate candidate + uniqueness check
+    // generate candidate + uniqueness check (DB + Sheets)
     let code = (p.name ? p.name.toString().slice(0,3).toUpperCase().replace(/[^A-Z0-9]/g,'') : '') + alphaNum();
     code = code.substring(0, 10);
 
-    let tries = 0;
     // ensure unique in DB
+    let tries = 0;
     while(DB.profiles.find(x => x.referralcode === code) && tries < 10) {
       code = (p.name ? p.name.toString().slice(0,3).toUpperCase().replace(/[^A-Z0-9]/g,'') : '') + alphaNum();
       code = code.substring(0,10);
       tries++;
     }
 
-    // ensure unique in Sheets (global check)
+    // ensure unique in Sheets if available
     if(sheetsClient && SPREADSHEET_ID) {
-       // ... existing uniqueness logic ...
-       // (تم اختصار كود فحص التكرار العام هنا لأنه موجود مسبقاً، المهم هو فحص المستخدم نفسه أعلاه)
+      try {
+        const resp = await sheetsClient.spreadsheets.values.get({
+          spreadsheetId: SPREADSHEET_ID,
+          range: 'Profiles!J2:J10000'
+        });
+        const rows = (resp.data && resp.data.values) || [];
+        const exists = new Set(rows.map(r => (r && r[0]) ? String(r[0]).trim() : ''));
+        tries = 0;
+        while(exists.has(code) && tries < 10){
+          code = (p.name ? p.name.toString().slice(0,3).toUpperCase().replace(/[^A-Z0-9]/g,'') : '') + alphaNum();
+          code = code.substring(0,10); tries++;
+        }
+      } catch(e){
+        // ignore sheet scan errors, fallback to DB uniqueness
+      }
     }
 
-    // 4. Store in local DB
+    // store in local DB
     p.referralcode = code;
     saveData(DB);
 
-    // 5. Store in sheet: Only if passed the check above
+    // store in sheet: if row exists update J, else append a row with J set
     try {
-      if(userSheetRowIndex && sheetsClient){
-        // We found the row earlier and it was empty in J
+      const sheetRow = await getProfileFromSheet(String(personal));
+      if(sheetRow && sheetRow.rowIndex){
         await sheetsClient.spreadsheets.values.update({
           spreadsheetId: SPREADSHEET_ID,
-          range: `Profiles!J${userSheetRowIndex}`,
+          range: `Profiles!J${sheetRow.rowIndex}`,
           valueInputOption: 'RAW',
           requestBody: { values: [[ String(code) ]] }
         });
-      } else if(sheetsClient) {
-        // إذا لم يتم العثور على الصف (حالة نادرة)، نقوم بالإضافة
+      } else {
+        // append with empty placeholders up to column J (A..K) -> make sure we don't break structure
         const vals = [[ String(personal), String(p.name||''), String(p.email||''), String(p.password||''), String(p.phone||''), String(typeof p.balance !== 'undefined' ? p.balance : ''), String(p.loginNumber||''), String(p.vip||''), String(p.orders||''), String(code), '' ]];
         await sheetsClient.spreadsheets.values.append({
           spreadsheetId: SPREADSHEET_ID,
@@ -1521,6 +1506,7 @@ app.post('/api/referral/generate', async (req, res) => {
         });
       }
     } catch(e){
+      // sheet write failed -> keep local DB only
       console.warn('referral generate: sheet write failed', e);
     }
 
